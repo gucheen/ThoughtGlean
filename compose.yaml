@@ -1,0 +1,14 @@
+services:
+  thoughtglean:
+    build: .
+    restart: unless-stopped
+    environment:
+      THOUGHTGLEAN_ADDR: :8080
+      THOUGHTGLEAN_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - thoughtglean-data:/data
+
+volumes:
+  thoughtglean-data:
