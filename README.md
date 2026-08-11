@@ -73,6 +73,8 @@ docker compose ps
 
 默认入口为 `http://127.0.0.1:8080`。前端“中继地址”填写这个入口最终对应的公共来源，例如 `https://notes.example.com`，无需附加 `/api` 路径。
 
+`.env.example` 默认通过 `THOUGHTGLEAN_DATA_PATH=./data` 将 relay 数据保存到仓库的 `data/` 目录。容器会读取挂载目录的 UID/GID，并以同一身份运行 relay，因此不需要把目录权限开放为 `777`。若删除该配置，则使用 Docker 命名卷 `thoughtglean-relay-data`。
+
 生产环境应继续在 Docker 入口之前配置 HTTPS 反向代理。默认仅绑定回环地址，适合 Caddy、宿主机 Nginx 或 Cloudflare Tunnel；若仅在可信局域网临时测试手机访问，可在 `.env` 中将 `THOUGHTGLEAN_HTTP_BIND` 改为 `0.0.0.0`，但 Passkey、PWA 和浏览器加密能力仍应使用 HTTPS。
 
 常用维护命令：

@@ -11,7 +11,7 @@ services:
       THOUGHTGLEAN_DATA_DIR: /data
       THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN: ${THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN:?请在 .env 中设置 relay 注册密钥}
     volumes:
-      - thoughtglean-relay-data:/data
+      - ${THOUGHTGLEAN_DATA_PATH:-thoughtglean-relay-data}:/data
     expose:
       - "8080"
     security_opt:

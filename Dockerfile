@@ -30,7 +30,7 @@ RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/thoughtglean ./cmd
 FROM debian:bookworm-slim AS relay
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl gosu \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 thoughtglean \
     && useradd --uid 10001 --gid thoughtglean --no-create-home --shell /usr/sbin/nologin thoughtglean \
@@ -38,18 +38,19 @@ RUN apt-get update \
     && chown thoughtglean:thoughtglean /data
 
 COPY --from=relay-build /out/thoughtglean /app/thoughtglean
+COPY docker/relay-entrypoint.sh /app/relay-entrypoint.sh
+RUN chmod 0755 /app/relay-entrypoint.sh
 
 ENV THOUGHTGLEAN_ADDR=:8080
 ENV THOUGHTGLEAN_DATA_DIR=/data
 
-USER thoughtglean
 VOLUME ["/data"]
 EXPOSE 8080
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=5 \
   CMD curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null || exit 1
 
-ENTRYPOINT ["/app/thoughtglean"]
+ENTRYPOINT ["/app/relay-entrypoint.sh"]
 
 
 FROM nginx:1.27-alpine AS web
