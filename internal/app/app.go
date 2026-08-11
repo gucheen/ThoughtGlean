@@ -4,13 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"mime"
 	"net/http"
@@ -25,30 +25,25 @@ import (
 	"thoughtglean/internal/attachments"
 	"thoughtglean/internal/mirror"
 	"thoughtglean/internal/store"
-	"thoughtglean/internal/webui"
 )
 
 type App struct {
-	store           *store.Store
-	mirror          *mirror.Mirror
-	attachments     *attachments.Store
-	passkey         *webauthn.WebAuthn
-	relayOnly       bool
-	enrollmentToken []byte
-	handler         http.Handler
-	syncChanged     chan struct{}
+	store       *store.Store
+	mirror      *mirror.Mirror
+	attachments *attachments.Store
+	passkey     *webauthn.WebAuthn
+	ownerToken  []byte
+	handler     http.Handler
 }
 
 func (a *App) SetAttachmentStore(attachmentStore *attachments.Store) {
 	a.attachments = attachmentStore
 }
 
-// SetRelayOnly turns this process into an opaque sync relay. Its public
-// surface is limited to health and /api/sync/v1; it cannot serve or accept
-// plaintext notes, backups, passkeys, local event queues, or the web UI.
-func (a *App) SetRelayOnly(relayOnly bool) { a.relayOnly = relayOnly }
-
-func (a *App) SetRelayEnrollmentToken(token string) { a.enrollmentToken = []byte(token) }
+// SetOwnerToken enables the single-owner authentication mode used by the
+// server-backed application. The token is exchanged for an HttpOnly cookie
+// and is never stored in browser JavaScript storage.
+func (a *App) SetOwnerToken(token string) { a.ownerToken = []byte(token) }
 
 func (a *App) ConfigurePasskey(rpID, origin string) error {
 	configured, err := webauthn.New(&webauthn.Config{RPID: rpID, RPDisplayName: "ThoughtGlean", RPOrigins: []string{origin},
@@ -76,22 +71,12 @@ func (a *App) SyncMarkdownMirror(ctx context.Context) error {
 }
 
 func New(noteStore *store.Store) *App {
-	app := &App{store: noteStore, syncChanged: make(chan struct{}, 1)}
+	app := &App{store: noteStore}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", app.health)
-	// Sync endpoints are intentionally public to the normal Passkey middleware:
-	// a separately deployed relay has no local user/passkey database. Access is
-	// instead controlled by an unguessable vault id plus a 256-bit bearer token.
-	mux.HandleFunc("POST /api/sync/v1/vaults", app.claimSyncVault)
-	mux.HandleFunc("GET /api/sync/v1/operations", app.listSyncOperations)
-	mux.HandleFunc("GET /api/sync/v1/subscribe", app.subscribeSyncOperations)
-	mux.HandleFunc("POST /api/sync/v1/operations", app.appendSyncOperations)
-	mux.HandleFunc("PUT /api/sync/v1/blobs/{id}", app.putSyncBlob)
-	mux.HandleFunc("GET /api/sync/v1/blobs/{id}", app.getSyncBlob)
-	mux.HandleFunc("GET /api/sync/local/events", app.listLocalSyncEvents)
-	mux.HandleFunc("POST /api/sync/local/events/ack", app.ackLocalSyncEvents)
-	mux.HandleFunc("POST /api/sync/local/apply", app.applyLocalSyncEvent)
-	mux.HandleFunc("POST /api/sync/local/attachments", app.applyLocalSyncAttachment)
+	mux.HandleFunc("GET /api/sync/snapshot", app.syncSnapshot)
+	mux.HandleFunc("POST /api/sync/apply", app.applyLocalSyncEvent)
+	mux.HandleFunc("POST /api/sync/attachments", app.applyLocalSyncAttachment)
 	mux.HandleFunc("GET /api/backup.json", app.downloadBackup)
 	mux.HandleFunc("GET /api/backup.zip", app.downloadFullBackup)
 	mux.HandleFunc("GET /api/export.md", app.downloadMarkdown)
@@ -99,6 +84,7 @@ func New(noteStore *store.Store) *App {
 	mux.HandleFunc("POST /api/backups/restore", app.restoreBackup)
 	mux.HandleFunc("POST /api/backups/restore.zip", app.restoreFullBackup)
 	mux.HandleFunc("GET /api/auth/status", app.authStatus)
+	mux.HandleFunc("POST /api/auth/token", app.loginWithOwnerToken)
 	mux.HandleFunc("POST /api/auth/register/options", app.beginRegistration)
 	mux.HandleFunc("POST /api/auth/register/verify", app.finishRegistration)
 	mux.HandleFunc("POST /api/auth/login/options", app.beginLogin)
@@ -121,8 +107,7 @@ func New(noteStore *store.Store) *App {
 	mux.HandleFunc("POST /api/notes/{id}/attachments", app.uploadAttachment)
 	mux.HandleFunc("GET /api/attachments/{id}", app.serveAttachment)
 	mux.HandleFunc("DELETE /api/attachments/{id}", app.deleteAttachment)
-	mux.Handle("/", staticHandler(webui.Assets()))
-	app.handler = securityHeaders(app.relayOnlyGuard(syncRelayCORS(sameOrigin(app.requireAuthentication(mux)))))
+	app.handler = securityHeaders(sameOrigin(app.requireAuthentication(mux)))
 	return app
 }
 
@@ -130,241 +115,31 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.handler.ServeHTTP(w, r)
 }
 
-func (a *App) relayOnlyGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.relayOnly && r.URL.Path != "/api/health" && !strings.HasPrefix(r.URL.Path, "/api/sync/v1/") {
-			http.NotFound(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func syncCredentials(w http.ResponseWriter, r *http.Request) (string, []byte, bool) {
-	vaultID := r.Header.Get("X-ThoughtGlean-Vault")
-	authorization := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authorization, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sync vault credentials are required"})
-		return "", nil, false
-	}
-	token, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(authorization, "Bearer "))
-	if err != nil || len(token) != 32 {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sync vault credentials are required"})
-		return "", nil, false
-	}
-	return vaultID, token, true
-}
-
-func (a *App) claimSyncVault(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	exists, err := a.store.HasSyncVault(r.Context(), vaultID, token)
+// syncSnapshot returns the authoritative plaintext state for the owner's
+// devices. A full snapshot keeps the contract intentionally simple: personal
+// libraries are small, and the complete server state is easy to recover,
+// inspect and evolve.
+func (a *App) syncSnapshot(w http.ResponseWriter, r *http.Request) {
+	backup, err := a.store.BackupData(r.Context())
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	if !exists {
-		provided := []byte(r.Header.Get("X-ThoughtGlean-Enrollment"))
-		if len(a.enrollmentToken) == 0 || len(provided) != len(a.enrollmentToken) || subtle.ConstantTimeCompare(provided, a.enrollmentToken) != 1 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "relay enrollment is required to create a sync vault"})
-			return
-		}
-	}
-	if err := a.store.ClaimSyncVault(r.Context(), vaultID, token); err != nil {
-		if errors.Is(err, store.ErrSyncVaultNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "sync vault not found"})
-			return
-		}
-		writeAPIError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *App) listSyncOperations(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	after := int64(0)
-	if rawAfter := r.URL.Query().Get("after"); rawAfter != "" {
-		var err error
-		after, err = strconv.ParseInt(rawAfter, 10, 64)
-		if err != nil {
-			writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid sync cursor"})
-			return
-		}
-	}
-	if after < 0 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid sync cursor"})
-		return
-	}
-	limit := 100
-	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
-		var err error
-		limit, err = strconv.Atoi(rawLimit)
-		if err != nil {
-			writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid sync limit"})
-			return
-		}
-	}
-	operations, err := a.store.ListEncryptedOperations(r.Context(), vaultID, token, after, limit)
-	if errors.Is(err, store.ErrSyncVaultNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "sync vault not found"})
-		return
-	}
+	items, err := a.store.ListAllAttachments(r.Context())
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	next := after
-	if len(operations) > 0 {
-		next = operations[len(operations)-1].Sequence
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"operations": operations, "nextCursor": next})
-}
-
-func (a *App) appendSyncOperations(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		Operations []store.EncryptedOperation `json:"operations"`
-	}
-	if err := decodeSyncJSON(w, r, &body); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	accepted, err := a.store.AppendEncryptedOperations(r.Context(), vaultID, token, body.Operations)
-	if errors.Is(err, store.ErrSyncVaultNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "sync vault not found"})
-		return
-	}
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"operations": accepted})
-	if len(accepted) > 0 {
-		select {
-		case a.syncChanged <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (a *App) subscribeSyncOperations(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-	if err != nil || after < 0 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid sync cursor"})
-		return
-	}
-	operations, err := a.store.ListEncryptedOperations(r.Context(), vaultID, token, after, 100)
-	if errors.Is(err, store.ErrSyncVaultNotFound) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if len(operations) == 0 {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(25 * time.Second):
-		case <-a.syncChanged:
-		}
-		operations, err = a.store.ListEncryptedOperations(r.Context(), vaultID, token, after, 100)
-		if err != nil {
-			writeAPIError(w, err)
-			return
-		}
-	}
-	next := after
-	if len(operations) > 0 {
-		next = operations[len(operations)-1].Sequence
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"operations": operations, "nextCursor": next})
-}
-
-func (a *App) putSyncBlob(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 30<<20)
-	ciphertext, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid encrypted sync blob"})
-		return
-	}
-	if err := a.store.PutEncryptedBlob(r.Context(), vaultID, token, r.PathValue("id"), ciphertext); err != nil {
-		if errors.Is(err, store.ErrSyncVaultNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "sync vault not found"})
-			return
-		}
-		writeAPIError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *App) getSyncBlob(w http.ResponseWriter, r *http.Request) {
-	vaultID, token, ok := syncCredentials(w, r)
-	if !ok {
-		return
-	}
-	ciphertext, err := a.store.GetEncryptedBlob(r.Context(), vaultID, token, r.PathValue("id"))
-	if errors.Is(err, store.ErrSyncVaultNotFound) || errors.Is(err, store.ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = w.Write(ciphertext)
-}
-
-func (a *App) listLocalSyncEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := a.store.PendingLocalSyncEvents(r.Context(), 100)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": events})
-}
-
-func (a *App) ackLocalSyncEvents(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		IDs []string `json:"ids"`
-	}
-	if err := decodeJSON(w, r, &body); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if len(body.IDs) > 100 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "too many sync events"})
-		return
-	}
-	if err := a.store.MarkLocalSyncEventsUploaded(r.Context(), body.IDs); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generatedAt": backup.GeneratedAt,
+		"notes":       backup.Notes,
+		"sources":     backup.Sources,
+		"attachments": items,
+	})
 }
 
 func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
@@ -398,9 +173,30 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Kind == "attachment.delete" {
+		attachment, err := a.store.GetAttachmentBySyncID(r.Context(), body.AttachmentSyncID)
+		if errors.Is(err, store.ErrNotFound) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
 		if err := a.store.DeleteAttachmentBySyncID(r.Context(), body.AttachmentSyncID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			writeAPIError(w, err)
 			return
+		}
+		if a.attachments != nil {
+			count, err := a.store.AttachmentReferenceCount(r.Context(), attachment.ContentHash)
+			if err != nil {
+				writeAPIError(w, err)
+				return
+			}
+			if count == 0 {
+				if err := a.attachments.Delete(attachment.ContentHash); err != nil {
+					log.Printf("remove unreferenced attachment %s: %v", attachment.ContentHash, err)
+				}
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -428,7 +224,7 @@ func (a *App) applyLocalSyncAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, attachments.MaxImageSize+(1<<20))
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid encrypted sync image"})
+		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid synced image"})
 		return
 	}
 	note, err := a.store.GetNoteBySyncID(r.Context(), r.FormValue("noteSyncId"))
@@ -460,36 +256,71 @@ func (a *App) applyLocalSyncAttachment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"attachment": item})
 }
 
-func (a *App) queueNoteSyncEvent(ctx context.Context, kind string, note store.Note) error {
-	parentSyncID := ""
-	if note.ContinuedFromID != nil {
-		parent, err := a.store.GetNote(ctx, *note.ContinuedFromID)
-		if err != nil {
-			return err
-		}
-		parentSyncID = parent.SyncID
-	}
-	_, err := a.store.QueueLocalSyncEvent(ctx, map[string]any{"kind": kind, "note": note, "continuedFromSyncId": parentSyncID})
-	return err
-}
-
 func (a *App) authStatus(w http.ResponseWriter, r *http.Request) {
 	configured, err := a.store.HasPasskey(r.Context())
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	authenticated := false
-	if configured {
-		if cookie, err := r.Cookie("thoughtglean_session"); err == nil {
-			authenticated, err = a.store.ValidateAuthSession(r.Context(), cookie.Value)
-			if err != nil {
-				writeAPIError(w, err)
-				return
-			}
-		}
+	authenticated, err := a.hasAuthenticatedSession(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"enabled": a.passkey != nil, "configured": configured, "authenticated": authenticated})
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": a.passkey != nil, "configured": configured, "authenticated": authenticated, "tokenLoginEnabled": len(a.ownerToken) != 0})
+}
+
+func (a *App) loginWithOwnerToken(w http.ResponseWriter, r *http.Request) {
+	if len(a.ownerToken) == 0 {
+		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "owner login is not configured"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	provided := []byte(body.Token)
+	if len(provided) != len(a.ownerToken) || subtle.ConstantTimeCompare(provided, a.ownerToken) != 1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "访问密钥不正确"})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: a.ownerSessionToken(), Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+}
+
+func (a *App) ownerSessionToken() string {
+	digest := sha256.Sum256(append(append([]byte(nil), a.ownerToken...), []byte("\x00ThoughtGlean owner session v1")...))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func (a *App) hasOwnerSession(r *http.Request) bool {
+	if len(a.ownerToken) == 0 {
+		return false
+	}
+	cookie, err := r.Cookie("thoughtglean_session")
+	if err != nil {
+		return false
+	}
+	expected := a.ownerSessionToken()
+	return len(cookie.Value) == len(expected) && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1
+}
+
+func (a *App) hasAuthenticatedSession(r *http.Request) (bool, error) {
+	if a.hasOwnerSession(r) {
+		return true, nil
+	}
+	cookie, err := r.Cookie("thoughtglean_session")
+	if err != nil {
+		return false, nil
+	}
+	return a.store.ValidateAuthSession(r.Context(), cookie.Value)
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request) {
@@ -588,12 +419,16 @@ func (a *App) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request, 
 			writeAPIError(w, err)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 12 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+		http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
 	}
 	writeJSON(w, http.StatusCreated, map[string]bool{"registered": true})
 }
 
 func (a *App) beginAdditionalPasskey(w http.ResponseWriter, r *http.Request) {
+	if a.passkey == nil {
+		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
+		return
+	}
 	owner, err := a.store.Owner(r.Context())
 	if err != nil {
 		writeAPIError(w, err)
@@ -720,15 +555,17 @@ func (a *App) finishLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 12 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("thoughtglean_session"); err == nil {
-		if err := a.store.DeleteAuthSession(r.Context(), cookie.Value); err != nil {
-			writeAPIError(w, err)
-			return
+		if !a.hasOwnerSession(r) {
+			if err := a.store.DeleteAuthSession(r.Context(), cookie.Value); err != nil {
+				writeAPIError(w, err)
+				return
+			}
 		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
@@ -1009,9 +846,6 @@ func (a *App) createNote(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusCreated
 	if duplicate {
 		status = http.StatusOK
-	} else if err := a.queueNoteSyncEvent(r.Context(), "note.upsert", note); err != nil {
-		writeAPIError(w, err)
-		return
 	}
 	writeJSON(w, status, map[string]any{"note": note, "duplicate": duplicate})
 }
@@ -1066,10 +900,6 @@ func (a *App) updateNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.queueNoteSyncEvent(r.Context(), "note.upsert", note); err != nil {
-		writeAPIError(w, err)
-		return
-	}
 	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
 		writeMirrorError(w, err)
 		return
@@ -1087,10 +917,6 @@ func (a *App) deleteNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.queueNoteSyncEvent(r.Context(), "note.upsert", note); err != nil {
-		writeAPIError(w, err)
-		return
-	}
 	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
 		writeMirrorError(w, err)
 		return
@@ -1105,10 +931,6 @@ func (a *App) restoreNote(w http.ResponseWriter, r *http.Request) {
 	}
 	note, err := a.store.RestoreNote(r.Context(), id)
 	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if err := a.queueNoteSyncEvent(r.Context(), "note.upsert", note); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -1162,15 +984,6 @@ func (a *App) setNoteSource(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := a.store.SetNoteSource(r.Context(), id, source)
 	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	note, err := a.store.GetNote(r.Context(), id)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if _, err := a.store.QueueLocalSyncEvent(r.Context(), map[string]any{"kind": "source.upsert", "noteSyncId": note.SyncID, "source": updated}); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -1228,15 +1041,6 @@ func (a *App) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	note, err := a.store.GetNote(r.Context(), noteID)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if _, err := a.store.QueueLocalSyncEvent(r.Context(), map[string]any{"kind": "attachment.upsert", "noteSyncId": note.SyncID, "attachment": item, "localURL": fmt.Sprintf("/api/attachments/%s", item.ID), "blobId": item.SyncID}); err != nil {
-		writeAPIError(w, err)
-		return
-	}
 	writeJSON(w, http.StatusCreated, map[string]any{"attachment": item})
 }
 
@@ -1281,15 +1085,6 @@ func (a *App) deleteAttachment(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	note, err := a.store.GetNote(r.Context(), attachment.NoteID)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if _, err := a.store.QueueLocalSyncEvent(r.Context(), map[string]any{"kind": "attachment.delete", "noteSyncId": note.SyncID, "attachmentSyncId": attachment.SyncID}); err != nil {
-		writeAPIError(w, err)
-		return
-	}
 	if a.attachments != nil {
 		count, err := a.store.AttachmentReferenceCount(r.Context(), attachment.ContentHash)
 		if err != nil {
@@ -1327,23 +1122,6 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return &clientError{Status: http.StatusBadRequest, Message: "invalid JSON: request body must contain exactly one JSON value"}
-	}
-	return nil
-}
-
-func decodeSyncJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return &clientError{Status: http.StatusUnsupportedMediaType, Message: "Content-Type must be application/json"}
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
-		return &clientError{Status: http.StatusBadRequest, Message: "invalid sync JSON"}
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return &clientError{Status: http.StatusBadRequest, Message: "invalid sync JSON"}
 	}
 	return nil
 }
@@ -1407,15 +1185,11 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/sync/v1/") {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut {
 			if origin := r.Header.Get("Origin"); origin != "" {
 				parsed, err := url.Parse(origin)
 				requestScheme := "http"
-				if r.TLS != nil {
+				if requestIsHTTPS(r) {
 					requestScheme = "https"
 				}
 				if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
@@ -1427,27 +1201,6 @@ func sameOrigin(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin writes are not allowed"})
 				return
 			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// A relay is called from the user's local ThoughtGlean origin, so it needs
-// CORS. It never receives cookies; the vault bearer token authorizes only an
-// opaque encrypted stream. Other application APIs remain same-origin only.
-func syncRelayCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/sync/v1/") {
-			next.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-ThoughtGlean-Vault")
-		w.Header().Set("Access-Control-Max-Age", "600")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -1466,7 +1219,20 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (a *App) requireAuthentication(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" || isPublicAuthRoute(r.URL.Path) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isPublicAuthRoute(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authenticated, err := a.hasAuthenticatedSession(r)
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		if authenticated {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1475,50 +1241,19 @@ func (a *App) requireAuthentication(next http.Handler) http.Handler {
 			writeAPIError(w, err)
 			return
 		}
-		if !configured {
+		if !configured && len(a.ownerToken) == 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cookie, err := r.Cookie("thoughtglean_session")
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Passkey login is required"})
-			return
-		}
-		valid, err := a.store.ValidateAuthSession(r.Context(), cookie.Value)
-		if err != nil {
-			writeAPIError(w, err)
-			return
-		}
-		if !valid {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Passkey login is required"})
-			return
-		}
-		next.ServeHTTP(w, r)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "需要登录"})
 	})
 }
 
 func isPublicAuthRoute(path string) bool {
-	if strings.HasPrefix(path, "/api/sync/v1/") {
-		return true
-	}
 	switch path {
-	case "/api/auth/status", "/api/auth/register/options", "/api/auth/register/verify", "/api/auth/login/options", "/api/auth/login/verify", "/api/auth/logout":
+	case "/api/auth/status", "/api/auth/token", "/api/auth/login/options", "/api/auth/login/verify", "/api/auth/logout":
 		return true
 	default:
 		return false
 	}
-}
-
-func staticHandler(assets fs.FS) http.Handler {
-	fileServer := http.FileServer(http.FS(assets))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
-			return
-		}
-		if r.URL.Path == "/" {
-			w.Header().Set("Cache-Control", "no-cache")
-		}
-		fileServer.ServeHTTP(w, r)
-	})
 }

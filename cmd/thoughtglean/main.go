@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"thoughtglean/internal/app"
+	"thoughtglean/internal/attachments"
 	"thoughtglean/internal/store"
 )
 
@@ -23,13 +24,27 @@ func main() {
 		log.Fatal(err)
 	}
 	defer noteStore.Close()
-	application := app.New(noteStore)
-	application.SetRelayOnly(true)
-	application.SetRelayEnrollmentToken(os.Getenv("THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN"))
-	if os.Getenv("THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN") == "" {
-		log.Printf("WARNING: relay enrollment is disabled; new vault creation will be rejected")
+	attachmentStore, err := attachments.New(filepath.Join(dataDir, "attachments"))
+	if err != nil {
+		log.Fatal(err)
 	}
-	log.Printf("ThoughtGlean is running as an opaque encrypted-sync relay")
+	application := app.New(noteStore)
+	application.SetAttachmentStore(attachmentStore)
+	ownerToken := os.Getenv("THOUGHTGLEAN_OWNER_TOKEN")
+	if ownerToken == "" {
+		log.Fatal("THOUGHTGLEAN_OWNER_TOKEN is required")
+	}
+	if len(ownerToken) < 32 {
+		log.Fatal("THOUGHTGLEAN_OWNER_TOKEN must contain at least 32 characters")
+	}
+	application.SetOwnerToken(ownerToken)
+	passkeyRPID := envOr("THOUGHTGLEAN_PASSKEY_RP_ID", "localhost")
+	passkeyOrigin := envOr("THOUGHTGLEAN_PASSKEY_ORIGIN", "http://localhost:5173")
+	if err := application.ConfigurePasskey(passkeyRPID, passkeyOrigin); err != nil {
+		log.Fatalf("configure Passkey: %v", err)
+	}
+	log.Printf("ThoughtGlean is running as a single-owner note server")
+	log.Printf("Passkey RP ID %q, origin %q", passkeyRPID, passkeyOrigin)
 
 	server := &http.Server{
 		Addr:              addr,

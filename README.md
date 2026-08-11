@@ -2,36 +2,34 @@
 
 拾念是一个属于个人的思考记忆库：念头出现时轻轻留下，日后只凭半句话或大概时间重新找到，并从那里继续想下去。
 
-它不是个人版团队知识库，也不要求先建立文件夹、卡片体系或知识图谱。第一版只专注一条可靠链路：
+它不是个人版团队知识库，也不要求先建立文件夹、卡片体系或知识图谱。产品取舍见 [docs/product-principles.md](docs/product-principles.md)。
 
-1. 正文之外没有必填项，快速留下一段原话。
-2. 浏览器确认写入本地数据库之前，输入与本地草稿不会清空。
-3. 使用中文、中英文混合词语搜索旧记录。
-4. 回到当时前后的记录，并从旧念头创建一条续记。
-5. 编辑使用 revision 防止多个窗口静默互相覆盖。
-6. 删除先进入回收站，可以恢复。
+## 当前能力
 
-完整取舍见 [docs/product-principles.md](docs/product-principles.md)。
+- React/Vite 前端、History API 路由与可安装 PWA；
+- Dexie / IndexedDB 离线副本，断网时仍可记录、搜索与编辑；
+- Go + SQLite 服务端权威存储和跨设备同步；
+- Passkey 优先登录，个人访问密钥作为首次设置和恢复入口；
+- 随机 ID、revision 冲突保护、软删除与恢复；
+- 时间流、星标、多词搜索、来源、续记与 Markdown 正文；
+- 多图片粘贴/上传、编辑模式删除与大图查看；
+- JSON 完整备份、恢复和 Markdown 导出；
+- Docker Compose 单入口部署。
 
-## 当前状态
+服务端保存权威数据，浏览器保留离线副本和待上传操作。首次用个人访问密钥登录后，可在设置中添加 Passkey；完整设计见 [docs/server-sync.md](docs/server-sync.md)。
 
-这是首个可运行切片，包含：
+## 本地开发
 
-- React/Vite Web UI 与可安装 PWA
-- Dexie / IndexedDB 本地副本：笔记、图片、同步队列和游标均按同步库隔离
-- 随机 ID、编辑版本、软删除与恢复
-- 标题与正文的大小写不敏感、多词 AND 检索
-- 时间流、星标、搜索、详情编辑、来源与续记
-- 响应式界面、图片粘贴上传与大图查看
-- 已配置同步库时的恢复代码解锁页：锁定后隐藏侧边栏、新记录入口与笔记内容
-- 产品上每人仅使用一个“我的同步库”；底层分库仅用于防止意外换库时混入数据
-- 端到端加密同步：浏览器内存密钥、密文盲中继、实时订阅、周期同步、冲突保留与加密图片 blob
+需要 Go 1.26、Node.js 20+ 和 pnpm 11。
 
-浏览器端是独立静态应用：手机和桌面只需访问其 HTTPS 地址，不需要在设备上运行 Go。生产环境必须使用可信 HTTPS；加密同步中继经由可信反向代理发布。
+先启动服务端：
 
-## 构建与本地预览
+```bash
+mkdir -p data
+THOUGHTGLEAN_OWNER_TOKEN='仅供本机开发的长随机字符串' go run ./cmd/thoughtglean
+```
 
-需要 Node.js 20+ 和 pnpm 11。浏览器端构建结果位于 `internal/webui/assets/`，可由任意静态站点服务发布。
+再在另一个终端启动前端：
 
 ```bash
 corepack enable
@@ -39,68 +37,50 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-开发服务器会显示本地访问地址。生产构建使用：
+Vite 默认使用 `http://localhost:5173`，并把 `/api` 代理到 `http://127.0.0.1:8080`。若服务端端口不同，可以设置 `THOUGHTGLEAN_DEV_API_URL`：
 
 ```bash
-pnpm build
+THOUGHTGLEAN_DEV_API_URL=http://127.0.0.1:18080 pnpm dev
 ```
 
-将 `internal/webui/assets/` 部署到静态 HTTPS 域名即可。浏览器以 IndexedDB 保存本地笔记和图片，并会请求持久化存储以降低系统清理离线数据的概率。
-
-前端使用 History API 路由：`/`、`/starred`、`/all`、`/trash` 和 `/notes/:id`。生产静态服务器需要将不存在的无扩展名路径回退到 `index.html`，同时继续正常提供 `/dist/*`、`manifest.webmanifest` 和 `sw.js`；否则直接刷新笔记详情链接会返回服务器 404。
+Go 服务只提供 `/api/*`，不依赖预生成的前端文件。开发时访问 Vite 地址；Docker 部署时由 Nginx 提供前端静态文件并代理 API。
 
 ## Docker 部署
 
-仓库提供一个多目标 `Dockerfile` 和 `compose.yaml`：
-
-- `web` 使用 Nginx 提供 React/PWA、前端路由回退和静态资源缓存。
-- `relay` 以非 root 用户运行 Go 密文中继，并把 SQLite 数据保存在命名卷中。
-- Nginx 将 `/api/health` 和 `/api/sync/v1/*` 转发到内部 relay；relay 不直接暴露到宿主机。
-
-首次部署先创建环境文件：
+首次部署先生成配置：
 
 ```bash
 cp .env.example .env
 openssl rand -hex 32
 ```
 
-将第二条命令生成的内容填入 `.env` 的 `THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN`，然后启动：
+把生成值写入 `.env` 的 `THOUGHTGLEAN_OWNER_TOKEN`，然后运行：
 
 ```bash
 docker compose up -d --build
 docker compose ps
 ```
 
-默认入口为 `http://127.0.0.1:8080`。前端“中继地址”填写这个入口最终对应的公共来源，例如 `https://notes.example.com`，无需附加 `/api` 路径。
+默认入口为 `http://127.0.0.1:8080`。`web` 容器提供静态前端并把 `/api/*` 代理到内部 `server`；服务端不会直接暴露到宿主机。
 
-`.env.example` 默认通过 `THOUGHTGLEAN_DATA_PATH=./data` 将 relay 数据保存到仓库的 `data/` 目录。容器会读取挂载目录的 UID/GID，并以同一身份运行 relay，因此不需要把目录权限开放为 `777`。若删除该配置，则使用 Docker 命名卷 `thoughtglean-relay-data`。
+本机默认 Passkey 地址是 `http://localhost:8080`。正式域名部署时，必须把 `.env` 中 `THOUGHTGLEAN_PASSKEY_RP_ID` 改为域名（不带协议和端口），把 `THOUGHTGLEAN_PASSKEY_ORIGIN` 改为浏览器访问的完整 HTTPS Origin，例如 `https://notes.example.com`。Passkey 绑定 Origin，修改域名后需要重新注册。
 
-生产环境应继续在 Docker 入口之前配置 HTTPS 反向代理。默认仅绑定回环地址，适合 Caddy、宿主机 Nginx 或 Cloudflare Tunnel；若仅在可信局域网临时测试手机访问，可在 `.env` 中将 `THOUGHTGLEAN_HTTP_BIND` 改为 `0.0.0.0`，但 Passkey、PWA 和浏览器加密能力仍应使用 HTTPS。
+`.env.example` 默认将 `/data` 绑定到仓库的 `./data`。这里包含 SQLite 数据库和图片目录，应整体备份。若删除 `THOUGHTGLEAN_DATA_PATH`，Compose 会使用 `thoughtglean-data` 命名卷。容器会匹配挂载目录的 UID/GID，无需使用 `777` 权限。
 
-常用维护命令：
+生产环境必须在入口前配置 HTTPS。若仅在可信局域网临时测试手机访问，可将 `THOUGHTGLEAN_HTTP_BIND` 改为 `0.0.0.0`；但移动浏览器在普通局域网 HTTP 地址上不会开放 Passkey，需使用 HTTPS。长期部署仍应使用 HTTPS 和不可猜测的个人访问密钥。
 
-```bash
-docker compose logs -f
-docker compose pull
-docker compose up -d --build
-docker compose down
-```
+`docker compose down` 不会删除数据；不要执行 `docker compose down -v`，除非明确要永久删除命名卷中的全部数据。
 
-`docker compose down` 不会删除同步数据卷。不要执行 `docker compose down -v`，除非明确要永久删除 relay 中的全部密文数据。
-
-## 加密同步中继
-
-中继需要 Go 1.26、CGO 和可用的 C 编译器。它不提供 Web UI，也不存储明文笔记。
-
-```bash
-go run ./cmd/thoughtglean
-```
+## 配置
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `THOUGHTGLEAN_ADDR` | `127.0.0.1:8080` | HTTP 监听地址 |
-| `THOUGHTGLEAN_DATA_DIR` | `./data` | SQLite 数据目录 |
-| `THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN` | 必填 | 仅创建新同步库时需要的 relay 注册密钥 |
+| `THOUGHTGLEAN_ADDR` | `127.0.0.1:8080` | Go 服务监听地址 |
+| `THOUGHTGLEAN_DATA_DIR` | `./data` | SQLite 与附件数据目录 |
+| `THOUGHTGLEAN_OWNER_TOKEN` | 必填 | 至少 32 个字符的单人网页登录密钥 |
+| `THOUGHTGLEAN_PASSKEY_RP_ID` | `localhost` | Passkey 依赖方域名，不含协议和端口 |
+| `THOUGHTGLEAN_PASSKEY_ORIGIN` | `http://localhost:5173` | 浏览器访问应用的完整 Origin；Docker 默认在 `.env.example` 中设为 `http://localhost:8080` |
+| `THOUGHTGLEAN_DEV_API_URL` | `http://127.0.0.1:8080` | Vite 开发代理目标 |
 
 ## 验证
 
@@ -110,23 +90,5 @@ go vet ./...
 go build ./cmd/thoughtglean
 pnpm check
 pnpm build
+docker compose config
 ```
-
-## 端到端加密同步
-
-同步中继与本机笔记库是两个部署角色：本机库用于离线可读写和搜索；远端中继只保存 AES-GCM 密文操作包。加密密钥从仅由用户保管的恢复代码派生，未解锁时浏览器不保存密钥或中继访问令牌，也就不会进行远端读写。
-
-同步事件覆盖笔记、来源和图片的创建、更新、删除、恢复及续记关系。并发版本会保留为可见的“同步冲突”续记；服务端仅保存 AES-GCM 密文操作和密文图片 blob。完整协议、恢复取舍和接口说明见 [docs/encrypted-sync.md](docs/encrypted-sync.md)。
-
-### 部署中继
-
-远端中继应使用独立的数据目录和域名，并启用只读中继模式：
-
-```bash
-THOUGHTGLEAN_ADDR=127.0.0.1:8081 \
-THOUGHTGLEAN_DATA_DIR=/var/lib/thoughtglean-relay \
-THOUGHTGLEAN_SYNC_RELAY_ONLY=true \
-THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN='自行生成的长随机字符串' go run ./cmd/thoughtglean
-```
-
-再由 HTTPS 反向代理将该端口发布为同步地址。在此模式下，进程只开放 `/api/health` 与 `/api/sync/v1/`：没有 Web UI、Passkey、笔记、附件、备份、Markdown 镜像或本机同步 API。因此远端数据库可以只保存 vault 的令牌哈希、密文操作包和密文图片 blob；不要将它与任一本机笔记库共用数据目录。同步客户端填入的是该 HTTPS 地址。注册密钥只在首次创建同步库时填写，加入已有库只需恢复配对码。

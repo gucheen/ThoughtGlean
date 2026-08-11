@@ -1,0 +1,29 @@
+# 服务端同步
+
+拾念采用“服务端权威数据 + 浏览器离线副本”的个人应用架构：
+
+- Go 服务把明文笔记与附件元数据保存在 SQLite，图片文件保存在数据目录；
+- React 客户端使用 Dexie / IndexedDB 保存本机副本和待上传操作，断网时仍可记录、检索和编辑；
+- 登录、恢复联网、页面重新可见以及每 60 秒会触发同步；
+- 客户端先提交本地操作，再拉取服务端完整快照。个人资料库体量较小时，这个协议简单、透明，也更容易维护与恢复；
+- 多设备同时修改同一版本时，现有 revision 合并逻辑会保留冲突记录，避免静默覆盖。
+
+## 访问控制
+
+这是单人应用。部署时必须配置至少 32 个字符的 `THOUGHTGLEAN_OWNER_TOKEN`，浏览器用它登录后，服务端签发派生的 HttpOnly Cookie。访问密钥不会写入 localStorage 或 IndexedDB。
+
+服务端保存明文，因此生产部署必须使用 HTTPS，并保护好服务器、数据目录和备份。完整备份应同时包含 SQLite 数据库和 `attachments/` 目录；Docker 部署时直接备份挂载的整个 `/data` 即可。
+
+## 同步接口
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/auth/token` | 用个人访问密钥登录 |
+| `GET` | `/api/auth/status` | 查询登录状态 |
+| `POST` | `/api/auth/logout` | 清除登录 Cookie |
+| `POST` | `/api/sync/apply` | 提交笔记、来源或删除操作 |
+| `POST` | `/api/sync/attachments` | 上传图片 |
+| `GET` | `/api/sync/snapshot` | 获取服务端完整状态 |
+| `GET` | `/api/attachments/{id}` | 下载图片 |
+
+除健康检查和登录相关接口外，所有 API 都需要有效登录 Cookie，并通过同源写入检查。

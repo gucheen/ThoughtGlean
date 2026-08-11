@@ -2,5 +2,6 @@
 data/
 node_modules/
 .pnpm-store/
+/internal/webui/assets/
 .DS_Store
 .env

@@ -1,17 +1,19 @@
 name: thoughtglean
 
 services:
-  relay:
+  server:
     build:
       context: .
-      target: relay
+      target: server
     restart: unless-stopped
     environment:
       THOUGHTGLEAN_ADDR: :8080
       THOUGHTGLEAN_DATA_DIR: /data
-      THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN: ${THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN:?请在 .env 中设置 relay 注册密钥}
+      THOUGHTGLEAN_OWNER_TOKEN: ${THOUGHTGLEAN_OWNER_TOKEN:?请在 .env 中设置个人访问密钥}
+      THOUGHTGLEAN_PASSKEY_RP_ID: ${THOUGHTGLEAN_PASSKEY_RP_ID:-localhost}
+      THOUGHTGLEAN_PASSKEY_ORIGIN: ${THOUGHTGLEAN_PASSKEY_ORIGIN:-http://localhost:8080}
     volumes:
-      - ${THOUGHTGLEAN_DATA_PATH:-thoughtglean-relay-data}:/data
+      - ${THOUGHTGLEAN_DATA_PATH:-thoughtglean-data}:/data
     expose:
       - "8080"
     security_opt:
@@ -23,7 +25,7 @@ services:
       target: web
     restart: unless-stopped
     depends_on:
-      relay:
+      server:
         condition: service_healthy
     ports:
       - "${THOUGHTGLEAN_HTTP_BIND:-127.0.0.1}:${THOUGHTGLEAN_HTTP_PORT:-8080}:8080"
@@ -31,4 +33,4 @@ services:
       - no-new-privileges:true
 
 volumes:
-  thoughtglean-relay-data:
+  thoughtglean-data:

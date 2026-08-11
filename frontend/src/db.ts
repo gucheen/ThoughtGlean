@@ -87,6 +87,9 @@ export async function migrateLegacyLibrary() {
 
 export async function readDeviceMetadata<T>(key: string) { return (await device.metadata.get(key))?.value as T | undefined; }
 export async function writeDeviceMetadata(key: string, value: unknown) { await device.metadata.put({ key, value }); }
+export async function readLibraryMetadata<T>(key: string) { return (await db.metadata.get(key))?.value as T | undefined; }
+export async function writeLibraryMetadata(key: string, value: unknown) { await db.metadata.put({ key, value }); }
+export async function deleteLibraryMetadata(key: string) { await db.metadata.delete(key); }
 
 export const newID = (bytes = 16) => {
   const value = crypto.getRandomValues(new Uint8Array(bytes));
@@ -183,6 +186,22 @@ export async function restoreBackup(value: unknown) {
     await db.sources.bulkPut(sources);
     await db.attachments.bulkPut(attachments.map(({ data, ...attachment }) => ({ ...attachment, blob: base64ToBlob(data, attachment.mimeType) })));
   });
+}
+
+export async function queueLibrarySnapshot() {
+  const [notes, sources, attachments] = await Promise.all([db.notes.toArray(), db.sources.toArray(), db.attachments.toArray()]);
+  const noteByID = new Map(notes.map(note => [note.id, note]));
+  for (const note of notes) {
+    await queue({ kind: "note.upsert", note, continuedFromSyncId: note.continuedFromId ? noteByID.get(note.continuedFromId)?.syncId : undefined });
+  }
+  for (const source of sources) {
+    const note = noteByID.get(source.noteId);
+    if (note) await queue({ kind: "source.upsert", noteSyncId: note.syncId, source });
+  }
+  for (const attachment of attachments) {
+    const note = noteByID.get(attachment.noteId);
+    if (note) await queue({ kind: "attachment.upsert", noteSyncId: note.syncId, attachment: { ...attachment, blob: undefined } as Omit<Attachment, "blob">, blobId: attachment.syncId });
+  }
 }
 
 export async function markdownExport() {

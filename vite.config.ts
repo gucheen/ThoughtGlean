@@ -1,7 +1,9 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, ".", "THOUGHTGLEAN_");
+  return ({
   plugins: [react()],
   root: "frontend",
   publicDir: "public",
@@ -12,6 +14,9 @@ export default defineConfig({
     // IndexedDB database. Fail clearly instead of silently moving to 5174.
     strictPort: true,
     headers: { "Cache-Control": "no-store" },
+    proxy: {
+      "/api": { target: env.THOUGHTGLEAN_DEV_API_URL || "http://127.0.0.1:8080" },
+    },
   },
   preview: {
     host: "127.0.0.1",
@@ -24,4 +29,5 @@ export default defineConfig({
     assetsDir: "dist",
     sourcemap: false,
   },
+  });
 });

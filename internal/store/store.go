@@ -297,7 +297,7 @@ func (s *Store) ListPasskeyCredentials(ctx context.Context, user PasskeyUser) ([
 }
 
 // DeletePasskeyCredential refuses to remove the final credential, avoiding an
-// accidental permanent lockout of this personal vault.
+// accidental permanent lockout of this personal application.
 func (s *Store) DeletePasskeyCredential(ctx context.Context, user PasskeyUser, credentialID []byte) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -332,7 +332,7 @@ func (s *Store) CreateAuthSession(ctx context.Context, user PasskeyUser) (string
 	}
 	hash := sha256.Sum256(token)
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, hash[:], user.ID, now.Add(12*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, hash[:], user.ID, now.Add(30*24*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return "", err
 	}
@@ -566,11 +566,16 @@ func (s *Store) AddAttachment(ctx context.Context, attachment Attachment) (Attac
 		return Attachment{}, invalidInput("invalid attachment metadata")
 	}
 	attachment.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	syncID, err := newSyncID()
-	if err != nil {
-		return Attachment{}, err
+	if attachment.SyncID == "" {
+		syncID, err := newSyncID()
+		if err != nil {
+			return Attachment{}, err
+		}
+		attachment.SyncID = syncID
+	} else if !validSyncID(attachment.SyncID) {
+		return Attachment{}, invalidInput("invalid attachment sync id")
 	}
-	attachment.SyncID = syncID
+	var err error
 	attachment.ID, err = newSyncID()
 	if err != nil {
 		return Attachment{}, err
@@ -619,6 +624,15 @@ func (s *Store) ListAllAttachments(ctx context.Context) ([]Attachment, error) {
 func (s *Store) GetAttachment(ctx context.Context, id string) (Attachment, error) {
 	var attachment Attachment
 	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments WHERE id = ?`, id).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Attachment{}, ErrNotFound
+	}
+	return attachment, err
+}
+
+func (s *Store) GetAttachmentBySyncID(ctx context.Context, syncID string) (Attachment, error) {
+	var attachment Attachment
+	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments WHERE sync_id = ?`, syncID).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrNotFound
 	}
@@ -1317,6 +1331,18 @@ func newSyncID() (string, error) {
 		return "", fmt.Errorf("generate sync id: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func validSyncID(id string) bool {
+	if len(id) < 22 || len(id) > 128 {
+		return false
+	}
+	for _, char := range id {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func migrate(db *sql.DB) error {

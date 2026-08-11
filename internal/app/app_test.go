@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,9 +20,7 @@ func testApp(t *testing.T) *App {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { noteStore.Close() })
-	app := New(noteStore)
-	app.SetRelayEnrollmentToken("test-enrollment")
-	return app
+	return New(noteStore)
 }
 
 func TestPasskeyConfiguredProtectsDataAPIs(t *testing.T) {
@@ -52,18 +49,71 @@ func TestPasskeyConfiguredProtectsDataAPIs(t *testing.T) {
 	}
 }
 
-func TestRelayOnlyRejectsPlaintextAndUIRoutes(t *testing.T) {
+func TestOwnerTokenProtectsPlaintextSync(t *testing.T) {
 	app := testApp(t)
-	app.SetRelayOnly(true)
-	for _, path := range []string{"/", "/api/notes", "/api/backup.json", "/api/auth/status", "/api/sync/local/events"} {
-		response := requestJSON(t, app, http.MethodGet, path, nil)
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("relay-only %s status=%d", path, response.Code)
-		}
+	app.SetOwnerToken("personal-test-token")
+
+	blocked := requestJSON(t, app, http.MethodGet, "/api/sync/snapshot", nil)
+	if blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthed snapshot status=%d body=%s", blocked.Code, blocked.Body.String())
 	}
-	if response := requestJSON(t, app, http.MethodGet, "/api/health", nil); response.Code != http.StatusOK {
-		t.Fatalf("health status=%d", response.Code)
+	wrong := requestJSON(t, app, http.MethodPost, "/api/auth/token", map[string]string{"token": "wrong"})
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token status=%d", wrong.Code)
 	}
+	login := requestJSON(t, app, http.MethodPost, "/api/auth/token", map[string]string{"token": "personal-test-token"})
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("login status=%d cookies=%v body=%s", login.Code, login.Result().Cookies(), login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	note := store.Note{ID: "browser-local-id-00001", SyncID: "browser-sync-id-000001", Title: "服务端同步", Content: "明文同步内容", Revision: 1, CreatedAt: "2026-08-11T00:00:00Z", UpdatedAt: "2026-08-11T00:00:00Z"}
+	applyRequest := httptest.NewRequest(http.MethodPost, "/api/sync/apply", bytes.NewBufferString(mustJSON(t, map[string]any{"kind": "note.upsert", "note": note})))
+	applyRequest.Header.Set("Content-Type", "application/json")
+	applyRequest.AddCookie(cookie)
+	applied := httptest.NewRecorder()
+	app.ServeHTTP(applied, applyRequest)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply status=%d body=%s", applied.Code, applied.Body.String())
+	}
+	snapshotRequest := httptest.NewRequest(http.MethodGet, "/api/sync/snapshot", nil)
+	snapshotRequest.AddCookie(cookie)
+	snapshot := httptest.NewRecorder()
+	app.ServeHTTP(snapshot, snapshotRequest)
+	if snapshot.Code != http.StatusOK || !bytes.Contains(snapshot.Body.Bytes(), []byte("明文同步内容")) {
+		t.Fatalf("snapshot status=%d body=%s", snapshot.Code, snapshot.Body.String())
+	}
+}
+
+func TestPasskeySessionAlsoAuthenticatesOwnerTokenMode(t *testing.T) {
+	app := testApp(t)
+	app.SetOwnerToken("personal-test-token")
+	owner, err := app.store.CreateOwner(context.Background(), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.AddPasskeyCredential(context.Background(), owner, webauthn.Credential{ID: []byte("passkey-credential")}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := app.store.CreateAuthSession(context.Background(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/sync/snapshot", nil)
+	request.AddCookie(&http.Cookie{Name: "thoughtglean_session", Value: token})
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("passkey session status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
 func requestJSON(t *testing.T, app *App, method, path string, body any) *httptest.ResponseRecorder {
@@ -130,10 +180,10 @@ func TestNoteLifecycleAPI(t *testing.T) {
 	}
 }
 
-func TestStaticAndSecurityHeaders(t *testing.T) {
+func TestAPIServerDoesNotServeWebUI(t *testing.T) {
 	app := testApp(t)
 	response := requestJSON(t, app, http.MethodGet, "/", nil)
-	if response.Code != http.StatusOK || response.Header().Get("Content-Security-Policy") == "" {
+	if response.Code != http.StatusNotFound || response.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("status=%d headers=%v", response.Code, response.Header())
 	}
 }
@@ -209,124 +259,6 @@ func TestCrossOriginWriteChecksSchemeAndFetchMetadata(t *testing.T) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
-	}
-}
-
-func TestEncryptedSyncRelayStoresOnlyOpaqueOperations(t *testing.T) {
-	app := testApp(t)
-	vaultID := "pDha3W1XR7DpM0-VJwC1xA"
-	token := bytes.Repeat([]byte{7}, 32)
-	credentials := func(request *http.Request) {
-		request.Header.Set("X-ThoughtGlean-Vault", vaultID)
-		request.Header.Set("Authorization", "Bearer "+base64.RawURLEncoding.EncodeToString(token))
-		request.Header.Set("X-ThoughtGlean-Enrollment", "test-enrollment")
-	}
-	claim := httptest.NewRequest(http.MethodPost, "/api/sync/v1/vaults", nil)
-	credentials(claim)
-	claimed := httptest.NewRecorder()
-	app.ServeHTTP(claimed, claim)
-	if claimed.Code != http.StatusNoContent {
-		t.Fatalf("claim status=%d body=%s", claimed.Code, claimed.Body.String())
-	}
-
-	push := httptest.NewRequest(http.MethodPost, "/api/sync/v1/operations", bytes.NewBufferString(`{"operations":[{"operationId":"device-000000001","ciphertext":"eyJub3RlIjoiY2lwaGVydGV4dCJ9","createdAt":"2026-08-11T00:00:00Z"}]}`))
-	push.Header.Set("Content-Type", "application/json")
-	push.Header.Set("Origin", "https://local.example") // Sync relay intentionally permits the configured bearer flow cross-origin.
-	credentials(push)
-	pushed := httptest.NewRecorder()
-	app.ServeHTTP(pushed, push)
-	if pushed.Code != http.StatusCreated || !bytes.Contains(pushed.Body.Bytes(), []byte("ciphertext")) {
-		t.Fatalf("push status=%d body=%s", pushed.Code, pushed.Body.String())
-	}
-
-	pull := httptest.NewRequest(http.MethodGet, "/api/sync/v1/operations?after=0", nil)
-	credentials(pull)
-	pulled := httptest.NewRecorder()
-	app.ServeHTTP(pulled, pull)
-	if pulled.Code != http.StatusOK || !bytes.Contains(pulled.Body.Bytes(), []byte("eyJub3RlIjoiY2lwaGVydGV4dCJ9")) {
-		t.Fatalf("pull status=%d body=%s", pulled.Code, pulled.Body.String())
-	}
-	subscribe := httptest.NewRequest(http.MethodGet, "/api/sync/v1/subscribe?after=0", nil)
-	credentials(subscribe)
-	subscribed := httptest.NewRecorder()
-	app.ServeHTTP(subscribed, subscribe)
-	if subscribed.Code != http.StatusOK || !bytes.Contains(subscribed.Body.Bytes(), []byte("nextCursor")) {
-		t.Fatalf("subscribe status=%d body=%s", subscribed.Code, subscribed.Body.String())
-	}
-	if count, err := app.store.SyncOperationCount(context.Background(), vaultID); err != nil || count != 1 {
-		t.Fatalf("stored operations count=%d err=%v", count, err)
-	}
-
-	wrongToken := httptest.NewRequest(http.MethodGet, "/api/sync/v1/operations", nil)
-	wrongToken.Header.Set("X-ThoughtGlean-Vault", vaultID)
-	wrongToken.Header.Set("Authorization", "Bearer "+base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)))
-	blocked := httptest.NewRecorder()
-	app.ServeHTTP(blocked, wrongToken)
-	if blocked.Code != http.StatusNotFound {
-		t.Fatalf("wrong token status=%d body=%s", blocked.Code, blocked.Body.String())
-	}
-
-	blob := httptest.NewRequest(http.MethodPut, "/api/sync/v1/blobs/attachment-blob-000001", bytes.NewBufferString("opaque-encrypted-image"))
-	credentials(blob)
-	blobResponse := httptest.NewRecorder()
-	app.ServeHTTP(blobResponse, blob)
-	if blobResponse.Code != http.StatusNoContent {
-		t.Fatalf("blob put status=%d body=%s", blobResponse.Code, blobResponse.Body.String())
-	}
-	blobGet := httptest.NewRequest(http.MethodGet, "/api/sync/v1/blobs/attachment-blob-000001", nil)
-	credentials(blobGet)
-	blobRead := httptest.NewRecorder()
-	app.ServeHTTP(blobRead, blobGet)
-	if blobRead.Code != http.StatusOK || blobRead.Body.String() != "opaque-encrypted-image" {
-		t.Fatalf("blob get status=%d body=%s", blobRead.Code, blobRead.Body.String())
-	}
-}
-
-func TestRelayEnrollmentProtectsNewVaultClaims(t *testing.T) {
-	app := testApp(t)
-	request := httptest.NewRequest(http.MethodPost, "/api/sync/v1/vaults", nil)
-	request.Header.Set("X-ThoughtGlean-Vault", "pDha3W1XR7DpM0-VJwC1xA")
-	request.Header.Set("Authorization", "Bearer "+base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)))
-	blocked := httptest.NewRecorder()
-	app.ServeHTTP(blocked, request)
-	if blocked.Code != http.StatusForbidden {
-		t.Fatalf("unenrolled new vault status=%d body=%s", blocked.Code, blocked.Body.String())
-	}
-	request.Header.Set("X-ThoughtGlean-Enrollment", "test-enrollment")
-	accepted := httptest.NewRecorder()
-	app.ServeHTTP(accepted, request)
-	if accepted.Code != http.StatusNoContent {
-		t.Fatalf("enrolled new vault status=%d body=%s", accepted.Code, accepted.Body.String())
-	}
-}
-
-func TestLocalSyncEventsAreQueuedAndRemoteNoteCanBeApplied(t *testing.T) {
-	app := testApp(t)
-	created := requestJSON(t, app, http.MethodPost, "/api/notes", map[string]any{"content": "等待加密同步"})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
-	}
-	events := requestJSON(t, app, http.MethodGet, "/api/sync/local/events", nil)
-	if events.Code != http.StatusOK || !bytes.Contains(events.Body.Bytes(), []byte("note.upsert")) {
-		t.Fatalf("events status=%d body=%s", events.Code, events.Body.String())
-	}
-	var source struct {
-		Note store.Note `json:"note"`
-	}
-	if err := json.Unmarshal(created.Body.Bytes(), &source); err != nil {
-		t.Fatal(err)
-	}
-	remote := source.Note
-	remote.SyncID = "remote-note-sync-id-01"
-	remote.Content = "来自另一台设备"
-	remote.CreatedAt, remote.UpdatedAt = "2026-08-11T00:00:00Z", "2026-08-11T00:00:01Z"
-	applied := requestJSON(t, app, http.MethodPost, "/api/sync/local/apply", map[string]any{"kind": "note.upsert", "note": remote})
-	if applied.Code != http.StatusOK {
-		t.Fatalf("apply status=%d body=%s", applied.Code, applied.Body.String())
-	}
-	notes := requestJSON(t, app, http.MethodGet, "/api/notes", nil)
-	if notes.Code != http.StatusOK || !bytes.Contains(notes.Body.Bytes(), []byte("来自另一台设备")) {
-		t.Fatalf("notes status=%d body=%s", notes.Code, notes.Body.String())
 	}
 }
 
