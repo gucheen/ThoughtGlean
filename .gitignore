@@ -1,5 +1,6 @@
 /thoughtglean
 data/
 node_modules/
+.pnpm-store/
 .DS_Store
 .env

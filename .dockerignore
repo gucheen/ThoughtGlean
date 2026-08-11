@@ -2,6 +2,7 @@
 data
 thoughtglean
 node_modules
+.pnpm-store
 .DS_Store
 .env
 internal/webui/assets/dist
