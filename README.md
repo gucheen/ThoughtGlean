@@ -31,17 +31,18 @@
 
 ## 构建与本地预览
 
-需要 Node.js 20+。浏览器端构建结果位于 `internal/webui/assets/`，可由任意静态站点服务发布。
+需要 Node.js 20+ 和 pnpm 11。浏览器端构建结果位于 `internal/webui/assets/`，可由任意静态站点服务发布。
 
 ```bash
-npm ci
-npm run dev
+corepack enable
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
 开发服务器会显示本地访问地址。生产构建使用：
 
 ```bash
-npm run build
+pnpm build
 ```
 
 将 `internal/webui/assets/` 部署到静态 HTTPS 域名即可。浏览器以 IndexedDB 保存本地笔记和图片，并会请求持久化存储以降低系统清理离线数据的概率。
@@ -105,8 +106,8 @@ go run ./cmd/thoughtglean
 go test ./...
 go vet ./...
 go build ./cmd/thoughtglean
-npm run check
-npm run build
+pnpm check
+pnpm build
 ```
 
 ## 端到端加密同步

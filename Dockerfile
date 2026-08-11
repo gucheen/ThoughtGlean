@@ -3,12 +3,16 @@
 FROM node:22-alpine AS web-build
 
 WORKDIR /src
-COPY package.json package-lock.json ./
-RUN npm ci
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts ./
 COPY frontend ./frontend
-RUN npm run build
+RUN pnpm build
 
 
 FROM golang:1.26-bookworm AS relay-build
