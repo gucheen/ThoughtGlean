@@ -23,10 +23,17 @@ func main() {
 		log.Fatal(err)
 	}
 	defer noteStore.Close()
+	application := app.New(noteStore)
+	application.SetRelayOnly(true)
+	application.SetRelayEnrollmentToken(os.Getenv("THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN"))
+	if os.Getenv("THOUGHTGLEAN_RELAY_ENROLLMENT_TOKEN") == "" {
+		log.Printf("WARNING: relay enrollment is disabled; new vault creation will be rejected")
+	}
+	log.Printf("ThoughtGlean is running as an opaque encrypted-sync relay")
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           app.New(noteStore),
+		Handler:           application,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

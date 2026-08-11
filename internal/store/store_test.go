@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 func testStore(t *testing.T) *Store {
@@ -15,6 +19,56 @@ func testStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+func TestPasskeyOwnerAndCredentialStorage(t *testing.T) {
+	noteStore := testStore(t)
+	ctx := context.Background()
+	configured, err := noteStore.HasPasskey(ctx)
+	if err != nil || configured {
+		t.Fatalf("initial passkey configured=%v err=%v", configured, err)
+	}
+	owner, err := noteStore.CreateOwner(ctx, "我的拾念")
+	if err != nil || len(owner.ID) != 32 {
+		t.Fatalf("create owner=%#v err=%v", owner, err)
+	}
+	credential := webauthn.Credential{ID: []byte("credential-id")}
+	if err := noteStore.AddPasskeyCredential(ctx, owner, credential); err != nil {
+		t.Fatal(err)
+	}
+	if err := noteStore.DeletePasskeyCredential(ctx, owner, credential.ID); err == nil {
+		t.Fatal("final passkey was removed")
+	}
+	secondCredential := webauthn.Credential{ID: []byte("second-credential-id")}
+	if err := noteStore.AddPasskeyCredential(ctx, owner, secondCredential); err != nil {
+		t.Fatal(err)
+	}
+	if err := noteStore.DeletePasskeyCredential(ctx, owner, credential.ID); err != nil {
+		t.Fatal(err)
+	}
+	configured, err = noteStore.HasPasskey(ctx)
+	if err != nil || !configured {
+		t.Fatalf("stored passkey configured=%v err=%v", configured, err)
+	}
+	loaded, err := noteStore.Owner(ctx)
+	if err != nil || loaded.Name != owner.Name || len(loaded.Credentials) != 1 || string(loaded.Credentials[0].ID) != "second-credential-id" {
+		t.Fatalf("loaded owner=%#v err=%v", loaded, err)
+	}
+	token, err := noteStore.CreateAuthSession(ctx, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := noteStore.ValidateAuthSession(ctx, token)
+	if err != nil || !valid {
+		t.Fatalf("session valid=%v err=%v", valid, err)
+	}
+	if err := noteStore.DeleteAuthSession(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	valid, err = noteStore.ValidateAuthSession(ctx, token)
+	if err != nil || valid {
+		t.Fatalf("deleted session valid=%v err=%v", valid, err)
+	}
 }
 
 func TestCreateIsIdempotentAndSearchUsesAllTerms(t *testing.T) {
@@ -58,6 +112,12 @@ func TestRequestHashMigrationPreservesIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if created.SyncID == "" || len(created.SyncID) != 22 {
+		t.Fatalf("new note is missing a stable sync id: %#v", created)
+	}
+	if created.ID == "" || len(created.ID) != 22 {
+		t.Fatalf("new note is missing a random string primary key: %#v", created)
+	}
 	if _, err := legacy.db.Exec(`ALTER TABLE notes DROP COLUMN request_hash`); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +133,9 @@ func TestRequestHashMigrationPreservesIdempotency(t *testing.T) {
 	duplicate, wasDuplicate, err := migrated.CreateNote(context.Background(), input)
 	if err != nil || !wasDuplicate || duplicate.ID != created.ID {
 		t.Fatalf("migrated duplicate = %#v duplicate=%v err=%v", duplicate, wasDuplicate, err)
+	}
+	if duplicate.SyncID != created.SyncID {
+		t.Fatalf("sync id changed after migration: %q != %q", duplicate.SyncID, created.SyncID)
 	}
 	_, _, err = migrated.CreateNote(context.Background(), CreateNoteInput{RequestID: input.RequestID, Content: "另一段正文"})
 	var conflict *IdempotencyConflictError
@@ -114,6 +177,26 @@ func TestUpdateConflictDeleteAndRestore(t *testing.T) {
 	}
 }
 
+func TestRemoteConcurrentEditIsPreservedAsConflictNote(t *testing.T) {
+	noteStore := testStore(t)
+	ctx := context.Background()
+	local, _, err := noteStore.CreateNote(ctx, CreateNoteInput{Title: "同一念头", Content: "本机版本"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := local
+	remote.Content = "另一台设备版本"
+	remote.UpdatedAt = local.UpdatedAt
+	remote.Revision = local.Revision
+	conflict, err := noteStore.ApplyRemoteNote(ctx, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict.ID == local.ID || !strings.HasPrefix(conflict.Title, "同步冲突") || conflict.ContinuedFromID == nil || *conflict.ContinuedFromID != local.ID {
+		t.Fatalf("conflict=%#v local=%#v", conflict, local)
+	}
+}
+
 func TestContinuedNoteContext(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -125,5 +208,95 @@ func TestContinuedNoteContext(t *testing.T) {
 	context, err := store.NoteContext(ctx, second.ID, 2)
 	if err != nil || len(context.Before) != 1 || context.Before[0].ID != first.ID {
 		t.Fatalf("context = %#v, %v", context, err)
+	}
+}
+
+func TestBackupIncludesHistoryAndDetectsTampering(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	note, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "原题", Content: "第一版"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "第二版"
+	if _, err := store.UpdateNote(ctx, note.ID, UpdateNoteInput{Content: &content, ExpectedRevision: note.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteNote(ctx, note.ID); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := store.BackupData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backup.Notes) != 1 || backup.Notes[0].DeletedAt == nil || len(backup.Revisions) != 3 {
+		t.Fatalf("incomplete backup: %#v", backup)
+	}
+	if err := VerifyBackup(backup); err != nil {
+		t.Fatalf("valid backup rejected: %v", err)
+	}
+	backup.Notes[0].Content = "已被改写"
+	if err := VerifyBackup(backup); err == nil {
+		t.Fatal("tampered backup passed verification")
+	}
+}
+
+func TestMarkdownExportIsReadableAndExcludesTrash(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	active, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "保留", Content: "仍然可读"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trashed, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "回收", Content: "不应导出"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteNote(ctx, trashed.ID); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.MarkdownExport(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "## 保留") || !strings.Contains(text, "仍然可读") || strings.Contains(text, "不应导出") {
+		t.Fatalf("unexpected markdown: %s", text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("thoughtglean:id=%s", active.ID)) {
+		t.Fatalf("missing note metadata: %s", text)
+	}
+}
+
+func TestRestoreBackupReplacesDataAndPreservesIdempotency(t *testing.T) {
+	ctx := context.Background()
+	source := testStore(t)
+	note, _, err := source.CreateNote(ctx, CreateNoteInput{RequestID: "restored-request", Title: "恢复来源", Content: "第一版"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "第二版"
+	if _, err := source.UpdateNote(ctx, note.ID, UpdateNoteInput{Content: &content, ExpectedRevision: note.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := source.BackupData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := testStore(t)
+	if _, _, err := target.CreateNote(ctx, CreateNoteInput{Content: "应被替换"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.RestoreBackup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := target.ListNotes(ctx, ListOptions{View: "all"})
+	if err != nil || len(notes) != 1 || notes[0].ID != note.ID || notes[0].Content != content || notes[0].Revision != 2 {
+		t.Fatalf("restored notes=%#v err=%v", notes, err)
+	}
+	duplicate, wasDuplicate, err := target.CreateNote(ctx, CreateNoteInput{RequestID: "restored-request", Title: "恢复来源", Content: "第一版"})
+	if err != nil || !wasDuplicate || duplicate.ID != note.ID {
+		t.Fatalf("restored idempotency note=%#v duplicate=%v err=%v", duplicate, wasDuplicate, err)
 	}
 }

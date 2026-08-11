@@ -1,3 +1,7 @@
 .git
 data
 thoughtglean
+node_modules
+.DS_Store
+.env
+internal/webui/assets/dist
