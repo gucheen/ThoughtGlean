@@ -281,7 +281,18 @@ export function App() {
   }
 
   if (!authLoaded) return <main className="auth-gate"><p className="muted">正在连接服务器…</p></main>;
-  if (!authenticated) return <main className="auth-gate"><form className="auth-gate-card" onSubmit={event => { event.preventDefault(); if (showTokenLogin) void signIn(); else void signInWithPasskey(); }}><span className="auth-gate-mark">⌁</span><p className="eyebrow">ThoughtGlean</p><h1>登录拾念</h1>{passkeyEnabled && passkeyConfigured && !showTokenLogin ? <><p>使用设备上的 Passkey 快速解锁。</p><button className="button button-primary button-wide" type="submit" disabled={passkeyBusy}>{passkeyBusy ? "正在验证…" : "使用 Passkey 登录"}</button>{tokenLoginEnabled && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(true); setLoginError(""); }}>改用个人访问密钥</button>}</> : <><p>{passkeyEnabled && !passkeyConfigured ? "首次登录后可在设置中启用 Passkey。" : "输入服务器配置的个人访问密钥。"}</p><label>个人访问密钥<input type="password" value={accessToken} onChange={event => setAccessToken(event.target.value)} autoFocus autoComplete="current-password" /></label><button className="button button-primary button-wide" type="submit">登录</button>{passkeyConfigured && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(false); setLoginError(""); }}>返回 Passkey 登录</button>}</>}{loginError && <p className="inline-error">{loginError}</p>}</form></main>;
+  if (!authenticated) return <main className="auth-gate"><form className="auth-gate-card" onSubmit={event => { event.preventDefault(); if (showTokenLogin) void signIn(); else void signInWithPasskey(); }}>
+    <header className="auth-gate-header"><span className="auth-gate-brand"><i />拾念</span><p>THOUGHTGLEAN</p><h1>{showTokenLogin || !passkeyConfigured ? "使用密钥登录" : "欢迎回来"}</h1><span className="auth-gate-description">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? "使用设备上的 Passkey 快速登录。" : passkeyEnabled && !passkeyConfigured ? "登录后可在设置中启用 Passkey。" : "输入服务器配置的个人访问密钥。"}</span></header>
+    <div className="auth-gate-fields">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? <>
+      <button className="button button-primary button-wide auth-submit" type="submit" disabled={passkeyBusy}>{passkeyBusy ? "正在验证…" : "使用 Passkey 登录"}</button>
+      {tokenLoginEnabled && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(true); setLoginError(""); }}>改用个人访问密钥</button>}
+    </> : <>
+      <label htmlFor="ownerToken">个人访问密钥</label><input id="ownerToken" type="password" value={accessToken} onChange={event => setAccessToken(event.target.value)} autoFocus autoComplete="current-password" placeholder="输入访问密钥" />
+      <button className="button button-primary button-wide auth-submit" type="submit" disabled={!accessToken}>登录</button>
+      {passkeyConfigured && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(false); setLoginError(""); }}>返回 Passkey 登录</button>}
+    </>}{loginError && <p className="inline-error" role="alert">{loginError}</p>}</div>
+    <footer className="auth-gate-footer">个人应用 · 数据仅向你的服务器同步</footer>
+  </form></main>;
 
   return <div className="app-shell">
     <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong></span></button><label className="search-box"><span className="search-icon" aria-hidden="true" /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} type="search" placeholder="搜索记录" /><kbd>/</kbd></label><button className="button button-primary top-new" onClick={() => { showView(view === "trash" ? "recent" : view); requestAnimationFrame(() => document.getElementById("captureInput")?.focus()); }}><span>＋</span><span className="button-label">新记录</span></button></header>

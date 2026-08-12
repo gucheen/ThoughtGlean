@@ -141,11 +141,23 @@ button { cursor: pointer; }
 .dialog-actions button { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); }
 .dialog-actions .button-primary { border-color: var(--accent); color: #fff; background: var(--accent); }
 .image-lightbox img { max-width: 94vw; max-height: 90vh; object-fit: contain; }
-.auth-gate { min-height: calc(100vh - 56px); display: grid; place-items: center; }
-.auth-gate-card { width: min(100%, 430px); padding: 42px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); text-align: center; }
-.auth-gate-card label { display: grid; gap: 6px; text-align: left; }
-.auth-gate-card input { padding: 9px; border: 1px solid var(--line); border-radius: 7px; }
-.auth-alternative { display: block; margin: 12px auto 0; }
+.auth-gate { min-height: 100vh; display: grid; place-items: center; padding: 32px 20px; background: radial-gradient(circle at 50% 0, #fff 0, var(--canvas) 48%); }
+.auth-gate-card { width: min(100%, 420px); overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); box-shadow: 0 18px 55px #10182812; }
+.auth-gate-header { padding: 32px 32px 24px; text-align: left; }
+.auth-gate-brand { display: flex; align-items: center; gap: 8px; margin-bottom: 28px; font-size: 15px; font-weight: 750; }
+.auth-gate-brand i { width: 8px; height: 8px; border-radius: 3px; background: var(--accent); }
+.auth-gate-header > p { margin: 0 0 7px; color: var(--accent); font-size: 9px; font-weight: 750; letter-spacing: .12em; }
+.auth-gate-header h1 { margin: 0; font-size: 26px; letter-spacing: -.035em; }
+.auth-gate-description { display: block; margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.auth-gate-fields { display: grid; gap: 10px; padding: 0 32px 28px; }
+.auth-gate-fields label { color: var(--soft); font-size: 12px; font-weight: 650; text-align: left; }
+.auth-gate-fields input { width: 100%; height: 42px; padding: 0 12px; border: 1px solid #d0d5dd; border-radius: 7px; outline: 0; background: #fff; }
+.auth-gate-fields input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #2563eb1a; }
+.auth-gate-fields input::placeholder { color: #98a2b3; }
+.auth-submit { min-height: 42px; margin-top: 4px; }
+.auth-submit:disabled { cursor: not-allowed; }
+.auth-alternative { width: fit-content; display: block; margin: 2px auto 0; }
+.auth-gate-footer { padding: 16px 32px; border-top: 1px solid var(--line); color: var(--muted); background: #fafafa; font-size: 10px; text-align: center; }
 .inline-error { color: #b42318; font-size: 12px; }
 .inline-success { color: #067647; font-size: 12px; }
 .settings-dialog { max-height: min(680px, calc(100vh - 32px)); overflow: auto; }
@@ -185,4 +197,10 @@ button { cursor: pointer; }
   .note-row-open { grid-template-columns: 1fr; }
   .row-actions { opacity: 1; }
   .toast { right: 12px; bottom: 70px; left: 12px; justify-content: center; }
+  .auth-gate { align-items: start; padding: max(56px, 10vh) 16px 24px; }
+  .auth-gate-card { border-radius: 14px; }
+  .auth-gate-header { padding: 26px 24px 22px; }
+  .auth-gate-brand { margin-bottom: 24px; }
+  .auth-gate-fields { padding: 0 24px 24px; }
+  .auth-gate-footer { padding: 14px 24px; }
 }
