@@ -1,4 +1,4 @@
-import { db, newID, queue, type Attachment, type Note, type NoteSource, type SyncPayload, upsertIncoming } from "./db";
+import { db, newID, type Attachment, type Note, type NoteSource, type SyncPayload, upsertIncoming } from "./db";
 
 type ServerAttachment = Omit<Attachment, "blob"> & { contentHash?: string };
 type Snapshot = { generatedAt: string; notes: Note[]; sources: NoteSource[]; attachments: ServerAttachment[] };
@@ -121,7 +121,19 @@ export async function deletePasskey(id: string) {
 }
 
 export class ServerSync {
+  private active?: Promise<number>;
+
   async sync() {
+    if (this.active) return this.active;
+    this.active = this.runSync();
+    try {
+      return await this.active;
+    } finally {
+      this.active = undefined;
+    }
+  }
+
+  private async runSync() {
     const events = await db.events.orderBy("createdAt").toArray();
     for (const event of events) {
       await this.push(event.payload);
@@ -130,10 +142,13 @@ export class ServerSync {
 
     const response = await api("/api/sync/snapshot");
     const snapshot = await response.json() as Snapshot;
+    const pendingEvents = await db.events.toArray();
+    const pendingNoteSyncIDs = new Set(pendingEvents.flatMap(event => event.payload.kind === "note.upsert" ? [event.payload.note.syncId] : []));
+    const pendingAttachmentUpdateIDs = new Set(pendingEvents.flatMap(event => event.payload.kind === "attachment.update" ? [event.payload.attachmentSyncId] : []));
     const notes = [...snapshot.notes].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     for (const note of notes) {
       const parent = note.continuedFromId ? snapshot.notes.find(item => item.id === note.continuedFromId) : undefined;
-      await upsertIncoming({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId });
+      await upsertIncoming({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId }, undefined, !pendingNoteSyncIDs.has(note.syncId));
     }
 
     const noteByServerID = new Map(snapshot.notes.map(note => [note.id, note]));
@@ -152,14 +167,18 @@ export class ServerSync {
     }
     const serverAttachmentSyncIDs = new Set(snapshot.attachments.map(item => item.syncId));
     for (const item of snapshot.attachments) {
-      if (await db.attachments.where("syncId").equals(item.syncId).first()) continue;
+      const existing = await db.attachments.where("syncId").equals(item.syncId).first();
+      if (existing) {
+        if (!pendingAttachmentUpdateIDs.has(item.syncId) && (existing.altText ?? "") !== (item.altText ?? "")) await db.attachments.put({ ...existing, altText: item.altText });
+        continue;
+      }
       const note = noteByServerID.get(item.noteId);
       if (!note) continue;
       const image = await api(`/api/attachments/${encodeURIComponent(item.id)}`);
       await upsertIncoming({
         kind: "attachment.upsert",
         noteSyncId: note.syncId,
-        attachment: { id: newID(), syncId: item.syncId, noteId: "", originalName: item.originalName, mimeType: item.mimeType, byteSize: item.byteSize, createdAt: item.createdAt },
+        attachment: { id: newID(), syncId: item.syncId, noteId: "", originalName: item.originalName, altText: item.altText, mimeType: item.mimeType, byteSize: item.byteSize, createdAt: item.createdAt },
         blobId: item.id,
       }, await image.blob());
     }
@@ -177,14 +196,11 @@ export class ServerSync {
       const form = new FormData();
       form.set("noteSyncId", payload.noteSyncId);
       form.set("syncId", item.syncId);
+      form.set("altText", item.altText ?? "");
       form.set("image", item.blob, item.originalName);
       await api("/api/sync/attachments", { method: "POST", body: form });
       return;
     }
     await api("/api/sync/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
   }
-}
-
-export async function queueAttachment(noteSyncId: string, attachment: Attachment) {
-  await queue({ kind: "attachment.upsert", noteSyncId, attachment: { ...attachment, blob: undefined } as Omit<Attachment, "blob">, blobId: attachment.syncId });
 }

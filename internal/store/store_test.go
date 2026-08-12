@@ -195,6 +195,54 @@ func TestRemoteConcurrentEditIsPreservedAsConflictNote(t *testing.T) {
 	if conflict.ID == local.ID || !strings.HasPrefix(conflict.Title, "同步冲突") || conflict.ContinuedFromID == nil || *conflict.ContinuedFromID != local.ID {
 		t.Fatalf("conflict=%#v local=%#v", conflict, local)
 	}
+	retried, err := noteStore.ApplyRemoteNote(ctx, remote)
+	if err != nil || retried.ID != conflict.ID {
+		t.Fatalf("retried conflict=%#v err=%v; want id %s", retried, err, conflict.ID)
+	}
+	visible, err := noteStore.ListNotes(ctx, ListOptions{})
+	if err != nil || len(visible) != 2 {
+		t.Fatalf("retry created duplicate conflict: notes=%d err=%v", len(visible), err)
+	}
+}
+
+func TestRemoteConcurrentEditDoesNotTrustFutureClientClock(t *testing.T) {
+	noteStore := testStore(t)
+	ctx := context.Background()
+	local, _, err := noteStore.CreateNote(ctx, CreateNoteInput{Title: "时间", Content: "服务端版本"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := local
+	remote.Content = "时钟超前设备的版本"
+	remote.UpdatedAt = "2099-01-01T00:00:00Z"
+	conflict, err := noteStore.ApplyRemoteNote(ctx, remote)
+	if err != nil || conflict.ID == local.ID {
+		t.Fatalf("future clock overwrote local note: conflict=%#v err=%v", conflict, err)
+	}
+	unchanged, err := noteStore.GetNote(ctx, local.ID)
+	if err != nil || unchanged.Content != "服务端版本" {
+		t.Fatalf("local note=%#v err=%v", unchanged, err)
+	}
+}
+
+func TestAttachmentDescriptionPersistsAndUpdates(t *testing.T) {
+	noteStore := testStore(t)
+	ctx := context.Background()
+	note, _, err := noteStore.CreateNote(ctx, CreateNoteInput{Content: "带图记录"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment, err := noteStore.AddAttachment(ctx, Attachment{NoteID: note.ID, ContentHash: strings.Repeat("a", 64), OriginalName: "photo.jpg", AltText: "原始说明", MIMEType: "image/jpeg", ByteSize: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := noteStore.UpdateAttachmentAltBySyncID(ctx, attachment.SyncID, "更新后的说明"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := noteStore.ListAttachments(ctx, note.ID)
+	if err != nil || len(items) != 1 || items[0].AltText != "更新后的说明" {
+		t.Fatalf("attachments=%#v err=%v", items, err)
+	}
 }
 
 func TestContinuedNoteContext(t *testing.T) {

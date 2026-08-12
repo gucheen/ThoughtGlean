@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"fmt"
 )
 
 // ApplyRemoteNote merges a client note into the server's authoritative copy.
@@ -20,25 +23,28 @@ func (s *Store) ApplyRemoteNoteWithParent(ctx context.Context, incoming Note, pa
 	}
 	defer tx.Rollback()
 
-	var localID, localUpdated string
-	err = tx.QueryRowContext(ctx, `SELECT id, updated_at FROM notes WHERE sync_id = ?`, incoming.SyncID).Scan(&localID, &localUpdated)
+	var localID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM notes WHERE sync_id = ?`, incoming.SyncID).Scan(&localID)
 	if err == nil {
-		if localUpdated >= incoming.UpdatedAt {
-			local, getErr := getNote(ctx, tx, localID)
-			if getErr != nil {
-				return Note{}, getErr
-			}
-			if incoming.Revision >= local.Revision && syncedNoteDiffers(incoming, local) {
-				conflict, conflictErr := insertSyncConflict(ctx, tx, incoming, localID)
-				if conflictErr != nil {
-					return Note{}, conflictErr
-				}
-				if err := tx.Commit(); err != nil {
-					return Note{}, err
-				}
-				return conflict, nil
-			}
+		local, getErr := getNote(ctx, tx, localID)
+		if getErr != nil {
+			return Note{}, getErr
+		}
+		if !syncedNoteDiffers(incoming, local) {
 			return local, tx.Commit()
+		}
+		// Revision is the concurrency boundary. Browser clocks are not trusted:
+		// an edit based on the current or an older revision is preserved as a
+		// conflict even if that device's timestamp happens to be later.
+		if incoming.Revision <= local.Revision {
+			conflict, conflictErr := insertSyncConflict(ctx, tx, incoming, localID)
+			if conflictErr != nil {
+				return Note{}, conflictErr
+			}
+			if err := tx.Commit(); err != nil {
+				return Note{}, err
+			}
+			return conflict, nil
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE notes SET title=?, content=?, search_text=?, starred=?, revision=?, updated_at=?, deleted_at=? WHERE id=?`, incoming.Title, incoming.Content, normalizeSearch(incoming.Title+"\n"+incoming.Content), incoming.Starred, incoming.Revision, incoming.UpdatedAt, incoming.DeletedAt, localID)
 		if err != nil {
@@ -82,19 +88,19 @@ func syncedNoteDiffers(incoming, local Note) bool {
 }
 
 func insertSyncConflict(ctx context.Context, tx *sql.Tx, incoming Note, localID string) (Note, error) {
-	conflictSyncID, err := newSyncID()
-	if err != nil {
+	conflictSyncID := conflictIdentifier("sync", incoming)
+	var existingID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM notes WHERE sync_id = ?`, conflictSyncID).Scan(&existingID); err == nil {
+		return getNote(ctx, tx, existingID)
+	} else if err != sql.ErrNoRows {
 		return Note{}, err
 	}
-	conflictID, err := newSyncID()
-	if err != nil {
-		return Note{}, err
-	}
+	conflictID := conflictIdentifier("note", incoming)
 	conflictTitle := "同步冲突：" + incoming.Title
 	if incoming.Title == "" {
 		conflictTitle = "同步冲突记录"
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO notes (id,sync_id,title,content,search_text,starred,continued_from_id,revision,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, conflictID, conflictSyncID, conflictTitle, incoming.Content, normalizeSearch(conflictTitle+"\n"+incoming.Content), incoming.Starred, localID, 1, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt)
+	_, err := tx.ExecContext(ctx, `INSERT INTO notes (id,sync_id,title,content,search_text,starred,continued_from_id,revision,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, conflictID, conflictSyncID, conflictTitle, incoming.Content, normalizeSearch(conflictTitle+"\n"+incoming.Content), incoming.Starred, localID, 1, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt)
 	if err != nil {
 		return Note{}, err
 	}
@@ -103,4 +109,13 @@ func insertSyncConflict(ctx context.Context, tx *sql.Tx, incoming Note, localID 
 		return Note{}, err
 	}
 	return conflict, nil
+}
+
+func conflictIdentifier(kind string, incoming Note) string {
+	deletedAt := ""
+	if incoming.DeletedAt != nil {
+		deletedAt = *incoming.DeletedAt
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s\x00%t\x00%s", kind, incoming.SyncID, incoming.Revision, incoming.Title, incoming.Content, incoming.Starred, deletedAt)))
+	return base64.RawURLEncoding.EncodeToString(digest[:16])
 }

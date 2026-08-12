@@ -20,6 +20,7 @@ export type Attachment = {
   syncId: string;
   noteId: string;
   originalName: string;
+  altText?: string;
   mimeType: string;
   byteSize: number;
   createdAt: string;
@@ -31,6 +32,7 @@ export type SyncPayload =
   | { kind: "note.upsert"; note: Note; continuedFromSyncId?: string }
   | { kind: "source.upsert"; noteSyncId: string; source: NoteSource }
   | { kind: "attachment.upsert"; noteSyncId: string; attachment: Omit<Attachment, "blob">; blobId: string }
+  | { kind: "attachment.update"; attachmentSyncId: string; altText: string }
   | { kind: "attachment.delete"; attachmentSyncId: string };
 
 export type Metadata = { key: string; value: unknown };
@@ -103,10 +105,50 @@ export async function queue(payload: SyncPayload) {
 }
 
 export async function saveNote(note: Note, shouldQueue = true) {
-  await db.notes.put(note);
-  if (!shouldQueue) return;
-  const parent = note.continuedFromId ? await db.notes.get(note.continuedFromId) : undefined;
-  await queue({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId });
+  if (!shouldQueue) {
+    await db.notes.put(note);
+    return;
+  }
+  await db.transaction("rw", db.notes, db.events, async () => {
+    const parent = note.continuedFromId ? await db.notes.get(note.continuedFromId) : undefined;
+    await db.notes.put(note);
+    await db.events.put({
+      id: newID(),
+      payload: { kind: "note.upsert", note, continuedFromSyncId: parent?.syncId },
+      createdAt: now(),
+    });
+  });
+}
+
+export async function saveAttachment(noteSyncId: string, attachment: Attachment) {
+  await db.transaction("rw", db.attachments, db.events, async () => {
+    await db.attachments.put(attachment);
+    await db.events.put({
+      id: newID(),
+      payload: {
+        kind: "attachment.upsert",
+        noteSyncId,
+        attachment: { ...attachment, blob: undefined } as Omit<Attachment, "blob">,
+        blobId: attachment.syncId,
+      },
+      createdAt: now(),
+    });
+  });
+}
+
+export async function deleteAttachment(attachment: Attachment) {
+  await db.transaction("rw", db.attachments, db.events, async () => {
+    await db.attachments.delete(attachment.id);
+    await db.events.put({ id: newID(), payload: { kind: "attachment.delete", attachmentSyncId: attachment.syncId }, createdAt: now() });
+  });
+}
+
+export async function updateAttachmentAlt(attachment: Attachment, altText: string) {
+  const next = { ...attachment, altText };
+  await db.transaction("rw", db.attachments, db.events, async () => {
+    await db.attachments.put(next);
+    await db.events.put({ id: newID(), payload: { kind: "attachment.update", attachmentSyncId: attachment.syncId, altText }, createdAt: now() });
+  });
 }
 
 export function fieldsFromQuickCapture(value: string) {
@@ -132,10 +174,10 @@ export async function createNote(content: string, continuedFromId?: string) {
   return note;
 }
 
-export async function upsertIncoming(payload: SyncPayload, blob?: Blob) {
+export async function upsertIncoming(payload: SyncPayload, blob?: Blob, authoritative = false) {
   if (payload.kind === "note.upsert") {
     const existing = await db.notes.where("syncId").equals(payload.note.syncId).first();
-    if (!existing || payload.note.updatedAt > existing.updatedAt || (payload.note.updatedAt === existing.updatedAt && payload.note.revision > existing.revision)) {
+    if (!existing || authoritative || payload.note.updatedAt > existing.updatedAt || (payload.note.updatedAt === existing.updatedAt && payload.note.revision > existing.revision)) {
       const parent = payload.continuedFromSyncId ? await db.notes.where("syncId").equals(payload.continuedFromSyncId).first() : undefined;
       await saveNote({ ...payload.note, id: existing?.id ?? payload.note.id, continuedFromId: parent?.id }, false);
     }
@@ -152,6 +194,11 @@ export async function upsertIncoming(payload: SyncPayload, blob?: Blob) {
   if (payload.kind === "attachment.delete") {
     const attachment = await db.attachments.where("syncId").equals(payload.attachmentSyncId).first();
     if (attachment) await db.attachments.delete(attachment.id);
+    return;
+  }
+  if (payload.kind === "attachment.update") {
+    const attachment = await db.attachments.where("syncId").equals(payload.attachmentSyncId).first();
+    if (attachment) await db.attachments.put({ ...attachment, altText: payload.altText });
     return;
   }
   const note = await db.notes.where("syncId").equals(payload.noteSyncId).first();

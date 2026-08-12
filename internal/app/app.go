@@ -140,6 +140,7 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 		Note                store.Note       `json:"note"`
 		NoteSyncID          string           `json:"noteSyncId"`
 		AttachmentSyncID    string           `json:"attachmentSyncId"`
+		AttachmentAltText   string           `json:"altText"`
 		ContinuedFromSyncID string           `json:"continuedFromSyncId"`
 		Source              store.NoteSource `json:"source"`
 	}
@@ -189,6 +190,14 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if body.Kind == "attachment.update" {
+		if err := a.store.UpdateAttachmentAltBySyncID(r.Context(), body.AttachmentSyncID, body.AttachmentAltText); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if body.Kind != "note.upsert" {
 		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "unsupported sync event"})
 		return
@@ -227,7 +236,7 @@ func (a *App) applyLocalSyncAttachment(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	item, err := a.store.AddAttachment(r.Context(), store.Attachment{SyncID: r.FormValue("syncId"), NoteID: note.ID, ContentHash: saved.Hash, OriginalName: header.Filename, MIMEType: header.Header.Get("Content-Type"), ByteSize: saved.Size})
+	item, err := a.store.AddAttachment(r.Context(), store.Attachment{SyncID: r.FormValue("syncId"), NoteID: note.ID, ContentHash: saved.Hash, OriginalName: header.Filename, AltText: r.FormValue("altText"), MIMEType: header.Header.Get("Content-Type"), ByteSize: saved.Size})
 	if err != nil {
 		// The identical content may already be present after a repeated pull.
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {

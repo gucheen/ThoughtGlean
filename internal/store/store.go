@@ -103,6 +103,7 @@ type Attachment struct {
 	NoteID       string `json:"noteId"`
 	ContentHash  string `json:"contentHash"`
 	OriginalName string `json:"originalName"`
+	AltText      string `json:"altText,omitempty"`
 	MIMEType     string `json:"mimeType"`
 	ByteSize     int64  `json:"byteSize"`
 	CreatedAt    string `json:"createdAt"`
@@ -580,7 +581,11 @@ func (s *Store) AddAttachment(ctx context.Context, attachment Attachment) (Attac
 	if err != nil {
 		return Attachment{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO note_attachments (id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.SyncID, attachment.NoteID, attachment.ContentHash, attachment.OriginalName, attachment.MIMEType, attachment.ByteSize, attachment.CreatedAt)
+	attachment.AltText = strings.TrimSpace(attachment.AltText)
+	if len(attachment.AltText) > 500 {
+		return Attachment{}, invalidInput("image description is too long")
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO note_attachments (id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.SyncID, attachment.NoteID, attachment.ContentHash, attachment.OriginalName, attachment.AltText, attachment.MIMEType, attachment.ByteSize, attachment.CreatedAt)
 	if err != nil {
 		return Attachment{}, err
 	}
@@ -588,7 +593,7 @@ func (s *Store) AddAttachment(ctx context.Context, attachment Attachment) (Attac
 }
 
 func (s *Store) ListAttachments(ctx context.Context, noteID string) ([]Attachment, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments WHERE note_id = ? ORDER BY id ASC`, noteID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at FROM note_attachments WHERE note_id = ? ORDER BY id ASC`, noteID)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +601,7 @@ func (s *Store) ListAttachments(ctx context.Context, noteID string) ([]Attachmen
 	attachments := make([]Attachment, 0)
 	for rows.Next() {
 		var attachment Attachment
-		if err := rows.Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt); err != nil {
+		if err := rows.Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.AltText, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt); err != nil {
 			return nil, err
 		}
 		attachments = append(attachments, attachment)
@@ -609,7 +614,7 @@ func (s *Store) ListAllAttachments(ctx context.Context) ([]Attachment, error) {
 }
 
 func allAttachments(ctx context.Context, q queryer) ([]Attachment, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments ORDER BY id ASC`)
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at FROM note_attachments ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +622,7 @@ func allAttachments(ctx context.Context, q queryer) ([]Attachment, error) {
 	attachments := make([]Attachment, 0)
 	for rows.Next() {
 		var attachment Attachment
-		if err := rows.Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt); err != nil {
+		if err := rows.Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.AltText, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt); err != nil {
 			return nil, err
 		}
 		attachments = append(attachments, attachment)
@@ -627,7 +632,7 @@ func allAttachments(ctx context.Context, q queryer) ([]Attachment, error) {
 
 func (s *Store) GetAttachment(ctx context.Context, id string) (Attachment, error) {
 	var attachment Attachment
-	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments WHERE id = ?`, id).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at FROM note_attachments WHERE id = ?`, id).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.AltText, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrNotFound
 	}
@@ -636,11 +641,30 @@ func (s *Store) GetAttachment(ctx context.Context, id string) (Attachment, error
 
 func (s *Store) GetAttachmentBySyncID(ctx context.Context, syncID string) (Attachment, error) {
 	var attachment Attachment
-	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments WHERE sync_id = ?`, syncID).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at FROM note_attachments WHERE sync_id = ?`, syncID).Scan(&attachment.ID, &attachment.SyncID, &attachment.NoteID, &attachment.ContentHash, &attachment.OriginalName, &attachment.AltText, &attachment.MIMEType, &attachment.ByteSize, &attachment.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrNotFound
 	}
 	return attachment, err
+}
+
+func (s *Store) UpdateAttachmentAltBySyncID(ctx context.Context, syncID, altText string) error {
+	altText = strings.TrimSpace(altText)
+	if !validSyncID(syncID) || len(altText) > 500 {
+		return invalidInput("invalid image description")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE note_attachments SET alt_text = ? WHERE sync_id = ?`, altText, syncID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) DeleteAttachment(ctx context.Context, id string) error {
@@ -951,7 +975,7 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO note_attachments (id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.SyncID, attachment.NoteID, attachment.ContentHash, attachment.OriginalName, attachment.MIMEType, attachment.ByteSize, attachment.CreatedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO note_attachments (id, sync_id, note_id, content_hash, original_name, alt_text, mime_type, byte_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, attachment.ID, attachment.SyncID, attachment.NoteID, attachment.ContentHash, attachment.OriginalName, attachment.AltText, attachment.MIMEType, attachment.ByteSize, attachment.CreatedAt); err != nil {
 			return err
 		}
 	}
@@ -1453,6 +1477,7 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	hasAttachmentSyncID := false
+	hasAttachmentAltText := false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -1464,12 +1489,20 @@ func migrate(db *sql.DB) error {
 		if name == "sync_id" {
 			hasAttachmentSyncID = true
 		}
+		if name == "alt_text" {
+			hasAttachmentAltText = true
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
 	if !hasAttachmentSyncID {
 		if _, err := tx.Exec(`ALTER TABLE note_attachments ADD COLUMN sync_id TEXT`); err != nil {
+			return err
+		}
+	}
+	if !hasAttachmentAltText {
+		if _, err := tx.Exec(`ALTER TABLE note_attachments ADD COLUMN alt_text TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}

@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS note_attachments (
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
     content_hash TEXT NOT NULL,
     original_name TEXT NOT NULL,
+    alt_text TEXT NOT NULL DEFAULT '',
     mime_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL CHECK (byte_size > 0),
     created_at TEXT NOT NULL,
