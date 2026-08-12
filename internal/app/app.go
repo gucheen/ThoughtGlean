@@ -3,7 +3,6 @@ package app
 import (
 	"archive/zip"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -23,13 +22,11 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"thoughtglean/internal/attachments"
-	"thoughtglean/internal/mirror"
 	"thoughtglean/internal/store"
 )
 
 type App struct {
 	store          *store.Store
-	mirror         *mirror.Mirror
 	attachments    *attachments.Store
 	passkey        *webauthn.WebAuthn
 	ownerToken     []byte
@@ -63,17 +60,6 @@ func (a *App) ConfigurePasskey(rpID, origin string) error {
 	a.passkey = configured
 	a.trustedOrigins[canonicalOrigin] = struct{}{}
 	return nil
-}
-
-func (a *App) SetMarkdownMirror(markdownMirror *mirror.Mirror) {
-	a.mirror = markdownMirror
-}
-
-func (a *App) SyncMarkdownMirror(ctx context.Context) error {
-	if a.mirror == nil {
-		return nil
-	}
-	return a.mirror.Sync(ctx, a.store)
 }
 
 func New(noteStore *store.Store) *App {
@@ -171,10 +157,6 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, err)
 			return
 		}
-		if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-			writeMirrorError(w, err)
-			return
-		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -214,10 +196,6 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 	note, err := a.store.ApplyRemoteNoteWithParent(r.Context(), body.Note, body.ContinuedFromSyncID)
 	if err != nil {
 		writeAPIError(w, err)
-		return
-	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"note": note})
@@ -597,12 +575,7 @@ func (a *App) downloadFullBackup(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "attachments are not configured"})
 		return
 	}
-	backup, err := a.store.BackupData(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	attachments, err := a.store.ListAllAttachments(r.Context())
+	backup, err := a.store.FullBackupData(r.Context())
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -611,10 +584,6 @@ func (a *App) downloadFullBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="thoughtglean-backup.zip"`)
 	archive := zip.NewWriter(w)
 	defer archive.Close()
-	backup.Attachments = attachments
-	if err := store.SealBackup(&backup); err != nil {
-		return
-	}
 	manifest, err := archive.Create("backup.json")
 	if err != nil {
 		return
@@ -623,7 +592,7 @@ func (a *App) downloadFullBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := make(map[string]bool)
-	for _, attachment := range attachments {
+	for _, attachment := range backup.Attachments {
 		if seen[attachment.ContentHash] {
 			continue
 		}
@@ -686,10 +655,6 @@ func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.RestoreBackup(r.Context(), backup); err != nil {
 		writeAPIError(w, err)
-		return
-	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, backupSummary(backup))
@@ -779,10 +744,6 @@ func (a *App) restoreFullBackup(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, backupSummary(backup))
 }
 
@@ -845,10 +806,6 @@ func (a *App) createNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
-		return
-	}
 	status := http.StatusCreated
 	if duplicate {
 		status = http.StatusOK
@@ -906,10 +863,6 @@ func (a *App) updateNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"note": note})
 }
 
@@ -923,10 +876,6 @@ func (a *App) deleteNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"note": note})
 }
 
@@ -938,10 +887,6 @@ func (a *App) restoreNote(w http.ResponseWriter, r *http.Request) {
 	note, err := a.store.RestoreNote(r.Context(), id)
 	if err != nil {
 		writeAPIError(w, err)
-		return
-	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"note": note})
@@ -991,10 +936,6 @@ func (a *App) setNoteSource(w http.ResponseWriter, r *http.Request) {
 	updated, err := a.store.SetNoteSource(r.Context(), id, source)
 	if err != nil {
 		writeAPIError(w, err)
-		return
-	}
-	if err := a.SyncMarkdownMirror(r.Context()); err != nil {
-		writeMirrorError(w, err)
 		return
 	}
 	if updated.NoteID == "" {
@@ -1159,13 +1100,6 @@ type clientError struct {
 }
 
 func (e *clientError) Error() string { return e.Message }
-
-func writeMirrorError(w http.ResponseWriter, err error) {
-	log.Printf("Markdown mirror failed: %v", err)
-	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-		"error": "记录已保存，但 Markdown 镜像未更新；请修复镜像目录后重试。",
-	})
-}
 
 func writeAPIError(w http.ResponseWriter, err error) {
 	var requestErr *clientError

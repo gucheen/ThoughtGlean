@@ -9,11 +9,15 @@ services:
     environment:
       THOUGHTGLEAN_ADDR: :8080
       THOUGHTGLEAN_DATA_DIR: /data
+      THOUGHTGLEAN_BACKUP_DIR: /backups
+      THOUGHTGLEAN_BACKUP_INTERVAL: ${THOUGHTGLEAN_BACKUP_INTERVAL:-24h}
+      THOUGHTGLEAN_BACKUP_KEEP: ${THOUGHTGLEAN_BACKUP_KEEP:-14}
       THOUGHTGLEAN_OWNER_TOKEN: ${THOUGHTGLEAN_OWNER_TOKEN:?请在 .env 中设置个人访问密钥}
       THOUGHTGLEAN_PASSKEY_RP_ID: ${THOUGHTGLEAN_PASSKEY_RP_ID:-localhost}
       THOUGHTGLEAN_PASSKEY_ORIGIN: ${THOUGHTGLEAN_PASSKEY_ORIGIN:-http://localhost:8080}
     volumes:
       - ${THOUGHTGLEAN_DATA_PATH:-thoughtglean-data}:/data
+      - ${THOUGHTGLEAN_BACKUP_PATH:-thoughtglean-backups}:/backups
     expose:
       - "8080"
     security_opt:
@@ -34,3 +38,4 @@ services:
 
 volumes:
   thoughtglean-data:
+  thoughtglean-backups:

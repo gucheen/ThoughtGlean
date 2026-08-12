@@ -605,7 +605,11 @@ func (s *Store) ListAttachments(ctx context.Context, noteID string) ([]Attachmen
 }
 
 func (s *Store) ListAllAttachments(ctx context.Context) ([]Attachment, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments ORDER BY id ASC`)
+	return allAttachments(ctx, s.db)
+}
+
+func allAttachments(ctx context.Context, q queryer) ([]Attachment, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, note_id, content_hash, original_name, mime_type, byte_size, created_at FROM note_attachments ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -715,25 +719,19 @@ func (s *Store) ListNotes(ctx context.Context, opts ListOptions) ([]Note, error)
 	return notes, rows.Err()
 }
 
-// ActiveNotes returns every non-deleted note for durable projections such as
-// the Markdown mirror. Unlike ListNotes, it has no presentation limit.
-func (s *Store) ActiveNotes(ctx context.Context) ([]Note, error) {
-	notes, err := allNotes(ctx, s.db)
-	if err != nil {
-		return nil, err
-	}
-	active := make([]Note, 0, len(notes))
-	for _, note := range notes {
-		if note.DeletedAt == nil {
-			active = append(active, note)
-		}
-	}
-	return active, nil
-}
-
 // BackupData returns every note, including trashed records, and every saved
 // revision. Its integrity digest covers all fields except the digest itself.
 func (s *Store) BackupData(ctx context.Context) (Backup, error) {
+	return s.backupData(ctx, false)
+}
+
+// FullBackupData returns a transactionally consistent snapshot including
+// attachment metadata. Callers must archive the referenced content files.
+func (s *Store) FullBackupData(ctx context.Context) (Backup, error) {
+	return s.backupData(ctx, true)
+}
+
+func (s *Store) backupData(ctx context.Context, includeAttachments bool) (Backup, error) {
 	// Keep notes and revisions in one SQLite read transaction: a concurrent
 	// edit must appear either wholly before or wholly after this snapshot.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -763,6 +761,12 @@ func (s *Store) BackupData(ctx context.Context) (Backup, error) {
 	backup.Sources, err = allSources(ctx, tx)
 	if err != nil {
 		return Backup{}, err
+	}
+	if includeAttachments {
+		backup.Attachments, err = allAttachments(ctx, tx)
+		if err != nil {
+			return Backup{}, err
+		}
 	}
 	if err := sealBackup(&backup); err != nil {
 		return Backup{}, err
