@@ -3,13 +3,14 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { createNote, db, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveNote, writeLibraryMetadata, type Attachment, type Note } from "./db";
 import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, queueAttachment, registerPasskey, ServerSync, type PasskeyInfo } from "./sync";
 import { takeSharedItems, type SharedItem } from "./share";
+import { applyPWAUpdate, pwaUpdateEvent } from "./pwa";
 
 type View = "recent" | "starred" | "all" | "trash";
 type SearchFilter = "all" | "images" | "code" | "source" | "conflicts";
 type Route = { view: View; noteID?: string };
 type HomeDraft = { content: string; continuedFromID?: string };
 type EditDraft = { title: string; content: string };
-type ToastState = { message: string; actions?: Array<{ label: string; run: () => void }> };
+type ToastState = { message: string; persistent?: boolean; actions?: Array<{ label: string; run: () => void }> };
 
 const homeDraftKey = "draft.home.v1";
 
@@ -108,10 +109,17 @@ export function App() {
     return () => removeEventListener("keydown", shortcut);
   }, []);
   useEffect(() => {
-    if (!toast) return;
+    if (!toast || toast.persistent) return;
     const timer = window.setTimeout(() => setToast(undefined), 5000);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    const available = () => setToast({ message: "新版本已准备好", persistent: true, actions: [
+      { label: "立即更新", run: applyPWAUpdate }, { label: "稍后", run: () => undefined },
+    ] });
+    addEventListener(pwaUpdateEvent, available);
+    return () => removeEventListener(pwaUpdateEvent, available);
+  }, []);
   useEffect(() => {
     const applyLocation = () => {
       const route = readRoute();

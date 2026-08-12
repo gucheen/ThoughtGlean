@@ -3,8 +3,17 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "THOUGHTGLEAN_");
+  const buildID = Date.now().toString(36);
   return ({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "thoughtglean-build-version",
+      transformIndexHtml(html) {
+        return html.replace("</head>", `    <meta name="thoughtglean-build" content="${buildID}" />\n  </head>`);
+      },
+    },
+  ],
   root: "frontend",
   publicDir: "public",
   server: {
