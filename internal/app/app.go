@@ -28,12 +28,13 @@ import (
 )
 
 type App struct {
-	store       *store.Store
-	mirror      *mirror.Mirror
-	attachments *attachments.Store
-	passkey     *webauthn.WebAuthn
-	ownerToken  []byte
-	handler     http.Handler
+	store          *store.Store
+	mirror         *mirror.Mirror
+	attachments    *attachments.Store
+	passkey        *webauthn.WebAuthn
+	ownerToken     []byte
+	trustedOrigins map[string]struct{}
+	handler        http.Handler
 }
 
 func (a *App) SetAttachmentStore(attachmentStore *attachments.Store) {
@@ -46,6 +47,10 @@ func (a *App) SetAttachmentStore(attachmentStore *attachments.Store) {
 func (a *App) SetOwnerToken(token string) { a.ownerToken = []byte(token) }
 
 func (a *App) ConfigurePasskey(rpID, origin string) error {
+	canonicalOrigin, err := normalizeOrigin(origin)
+	if err != nil {
+		return err
+	}
 	configured, err := webauthn.New(&webauthn.Config{RPID: rpID, RPDisplayName: "ThoughtGlean", RPOrigins: []string{origin},
 		AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
 		Timeouts: webauthn.TimeoutsConfig{
@@ -56,6 +61,7 @@ func (a *App) ConfigurePasskey(rpID, origin string) error {
 		return err
 	}
 	a.passkey = configured
+	a.trustedOrigins[canonicalOrigin] = struct{}{}
 	return nil
 }
 
@@ -71,7 +77,7 @@ func (a *App) SyncMarkdownMirror(ctx context.Context) error {
 }
 
 func New(noteStore *store.Store) *App {
-	app := &App{store: noteStore}
+	app := &App{store: noteStore, trustedOrigins: make(map[string]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", app.health)
 	mux.HandleFunc("GET /api/sync/snapshot", app.syncSnapshot)
@@ -107,7 +113,7 @@ func New(noteStore *store.Store) *App {
 	mux.HandleFunc("POST /api/notes/{id}/attachments", app.uploadAttachment)
 	mux.HandleFunc("GET /api/attachments/{id}", app.serveAttachment)
 	mux.HandleFunc("DELETE /api/attachments/{id}", app.deleteAttachment)
-	app.handler = securityHeaders(sameOrigin(app.requireAuthentication(mux)))
+	app.handler = securityHeaders(app.sameOrigin(app.requireAuthentication(mux)))
 	return app
 }
 
@@ -1183,17 +1189,36 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func sameOrigin(next http.Handler) http.Handler {
+func normalizeOrigin(value string) (string, error) {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("invalid HTTP origin %q", value)
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), nil
+}
+
+func (a *App) originAllowed(origin string, r *http.Request) bool {
+	canonical, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	requestScheme := "http"
+	if requestIsHTTPS(r) {
+		requestScheme = "https"
+	}
+	requestOrigin, err := normalizeOrigin(requestScheme + "://" + r.Host)
+	if err == nil && canonical == requestOrigin {
+		return true
+	}
+	_, trusted := a.trustedOrigins[canonical]
+	return trusted
+}
+
+func (a *App) sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut {
 			if origin := r.Header.Get("Origin"); origin != "" {
-				parsed, err := url.Parse(origin)
-				requestScheme := "http"
-				if requestIsHTTPS(r) {
-					requestScheme = "https"
-				}
-				if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
-					!strings.EqualFold(parsed.Scheme, requestScheme) || !strings.EqualFold(parsed.Host, r.Host) {
+				if !a.originAllowed(origin, r) {
 					writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin writes are not allowed"})
 					return
 				}

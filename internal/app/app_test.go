@@ -246,8 +246,9 @@ func TestInternalErrorsAreHidden(t *testing.T) {
 func TestCrossOriginWriteChecksSchemeAndFetchMetadata(t *testing.T) {
 	app := testApp(t)
 	for name, configure := range map[string]func(*http.Request){
-		"non HTTP origin":  func(request *http.Request) { request.Header.Set("Origin", "ftp://example.com") },
-		"cross-site fetch": func(request *http.Request) { request.Header.Set("Sec-Fetch-Site", "cross-site") },
+		"non HTTP origin":     func(request *http.Request) { request.Header.Set("Origin", "ftp://example.com") },
+		"different HTTP host": func(request *http.Request) { request.Header.Set("Origin", "https://evil.example") },
+		"cross-site fetch":    func(request *http.Request) { request.Header.Set("Sec-Fetch-Site", "cross-site") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/api/notes", bytes.NewBufferString(`{"content":"正文"}`))
@@ -259,6 +260,21 @@ func TestCrossOriginWriteChecksSchemeAndFetchMetadata(t *testing.T) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestConfiguredOriginCanWriteThroughDevelopmentProxy(t *testing.T) {
+	app := testApp(t)
+	if err := app.ConfigurePasskey("localhost", "http://localhost:5173"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/notes", bytes.NewBufferString(`{"content":"正文"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://localhost:5173")
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
