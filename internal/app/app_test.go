@@ -23,6 +23,15 @@ func testApp(t *testing.T) *App {
 	return New(noteStore)
 }
 
+func TestHealthIncludesServerVersion(t *testing.T) {
+	app := testApp(t)
+	app.SetVersion("test-build")
+	response := requestJSON(t, app, http.MethodGet, "/api/health", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"version":"test-build"`)) {
+		t.Fatalf("health status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPasskeyConfiguredProtectsDataAPIs(t *testing.T) {
 	app := testApp(t)
 	owner, err := app.store.CreateOwner(context.Background(), "owner")

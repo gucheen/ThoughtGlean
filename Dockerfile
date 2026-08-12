@@ -18,12 +18,13 @@ RUN pnpm build
 FROM golang:1.26-bookworm AS server-build
 
 WORKDIR /src
+ARG THOUGHTGLEAN_VERSION=0.1.0
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/thoughtglean ./cmd/thoughtglean
+RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${THOUGHTGLEAN_VERSION}" -o /out/thoughtglean ./cmd/thoughtglean
 
 
 FROM debian:bookworm-slim AS server

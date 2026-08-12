@@ -30,6 +30,7 @@ type App struct {
 	attachments    *attachments.Store
 	passkey        *webauthn.WebAuthn
 	ownerToken     []byte
+	version        string
 	trustedOrigins map[string]struct{}
 	handler        http.Handler
 }
@@ -42,6 +43,10 @@ func (a *App) SetAttachmentStore(attachmentStore *attachments.Store) {
 // server-backed application. The token is exchanged for an HttpOnly cookie
 // and is never stored in browser JavaScript storage.
 func (a *App) SetOwnerToken(token string) { a.ownerToken = []byte(token) }
+
+// SetVersion exposes the build version through the health endpoint so the
+// owner can verify which server build is currently serving the application.
+func (a *App) SetVersion(version string) { a.version = version }
 
 func (a *App) ConfigurePasskey(rpID, origin string) error {
 	canonicalOrigin, err := normalizeOrigin(origin)
@@ -63,7 +68,7 @@ func (a *App) ConfigurePasskey(rpID, origin string) error {
 }
 
 func New(noteStore *store.Store) *App {
-	app := &App{store: noteStore, trustedOrigins: make(map[string]struct{})}
+	app := &App{store: noteStore, version: "dev", trustedOrigins: make(map[string]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", app.health)
 	mux.HandleFunc("GET /api/sync/snapshot", app.syncSnapshot)
@@ -108,7 +113,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": a.version})
 }
 
 // syncSnapshot returns the authoritative plaintext state for the owner's

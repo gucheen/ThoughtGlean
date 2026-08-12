@@ -5,6 +5,8 @@ services:
     build:
       context: .
       target: server
+      args:
+        THOUGHTGLEAN_VERSION: ${THOUGHTGLEAN_VERSION:-0.1.0}
     restart: unless-stopped
     environment:
       THOUGHTGLEAN_ADDR: :8080

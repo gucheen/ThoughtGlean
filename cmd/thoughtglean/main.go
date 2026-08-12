@@ -19,6 +19,8 @@ import (
 	"thoughtglean/internal/store"
 )
 
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "restore-drill" {
 		if len(os.Args) != 3 {
@@ -61,6 +63,7 @@ func main() {
 	}
 	application := app.New(noteStore)
 	application.SetAttachmentStore(attachmentStore)
+	application.SetVersion(version)
 	ownerToken := os.Getenv("THOUGHTGLEAN_OWNER_TOKEN")
 	if ownerToken == "" {
 		log.Fatal("THOUGHTGLEAN_OWNER_TOKEN is required")

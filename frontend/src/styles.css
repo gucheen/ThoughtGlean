@@ -207,6 +207,15 @@ button { cursor: pointer; }
 .settings-section h3, .settings-section p { width: 100%; margin: 0; }
 .settings-section h3 { font-size: 13px; }
 .settings-section p { font-size: 12px; }
+.diagnostic-grid { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 4px 0 0; }
+.diagnostic-grid > div { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fafbfc; }
+.diagnostic-grid dt { margin-bottom: 5px; color: var(--muted); font-size: 10px; }
+.diagnostic-grid dd { overflow-wrap: anywhere; margin: 0; color: var(--ink); font-size: 12px; font-weight: 700; line-height: 1.45; }
+.diagnostic-error { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: #fff; font-size: 11px; }
+.diagnostic-error strong { overflow-wrap: anywhere; color: var(--ink); font-size: 11px; font-weight: 600; }
+.diagnostic-error small { white-space: nowrap; }
+.diagnostic-error.has-error { border-color: #fecdca; background: #fff8f7; }
+.diagnostic-error.has-error strong { color: #b42318; }
 .passkey-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .passkey-row span, .passkey-row small { display: block; }
 .passkey-row strong { font-size: 12px; }
@@ -223,6 +232,8 @@ button { cursor: pointer; }
   .sidebar { position: fixed; z-index: 45; top: auto; right: 0; bottom: 0; left: 0; min-height: 0; height: 58px; flex-direction: row; overflow: visible; padding: 5px 8px max(5px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); border-right: 0; background: #ffffffed; backdrop-filter: blur(14px); }
   .sidebar .primary-nav { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: visible; }
   .sidebar .nav-item { width: auto; min-width: 0; min-height: 44px; justify-content: center; padding: 0 6px; font-size: 11px; }
+  .diagnostic-grid { grid-template-columns: 1fr; }
+  .diagnostic-error { grid-template-columns: 1fr; gap: 3px; }
   .settings-nav { flex: 0 0 56px; margin-top: 0; border-top: 0; border-left: 1px solid var(--line); border-radius: 0; }
   .storage-note { display: none; }
   .main-content { padding: 24px 16px 52px; }

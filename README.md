@@ -109,6 +109,7 @@ docker compose exec server \
 | `THOUGHTGLEAN_BACKUP_INTERVAL` | `24h` | 自动备份间隔；设为 `0` 可禁用，其他值至少为 `1m` |
 | `THOUGHTGLEAN_BACKUP_KEEP` | `14` | 自动备份保留份数 |
 | `THOUGHTGLEAN_OWNER_TOKEN` | 必填 | 至少 32 个字符的单人网页登录密钥 |
+| `THOUGHTGLEAN_VERSION` | `0.1.0` | Docker 构建版本，显示在设置的运行状态中 |
 | `THOUGHTGLEAN_PASSKEY_RP_ID` | `localhost` | Passkey 依赖方域名，不含协议和端口 |
 | `THOUGHTGLEAN_PASSKEY_ORIGIN` | `http://localhost:5173` | 浏览器访问应用的完整 Origin；Docker 默认在 `.env.example` 中设为 `http://localhost:8080` |
 | `THOUGHTGLEAN_DEV_API_URL` | `http://127.0.0.1:8080` | Vite 开发代理目标 |

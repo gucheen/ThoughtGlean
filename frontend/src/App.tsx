@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note } from "./db";
-import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, ServerSync, type PasskeyInfo } from "./sync";
+import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, serverInfo, ServerSync, type PasskeyInfo } from "./sync";
 import { takeSharedItems, type SharedItem } from "./share";
 import { applyPWAUpdate, pwaUpdateEvent } from "./pwa";
 
@@ -12,9 +12,12 @@ type Route = { view: View; noteID?: string };
 type HomeDraft = { content: string; continuedFromID?: string; sourceURL?: string };
 type EditDraft = { title: string; content: string };
 type ToastState = { message: string; persistent?: boolean; actions?: Array<{ label: string; run: () => void }> };
+type SyncErrorInfo = { message: string; at: string };
 
 const homeDraftKey = "draft.home.v1";
 const recentSearchesKey = "search.recent.v1";
+const lastSyncSuccessKey = "sync.last-success.v1";
+const lastSyncErrorKey = "sync.last-error.v1";
 
 const viewPaths: Record<View, string> = { recent: "/", starred: "/starred", all: "/all", trash: "/trash" };
 
@@ -63,6 +66,9 @@ export function App() {
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [passkeyMessage, setPasskeyMessage] = useState("");
   const [syncStatus, setSyncStatus] = useState("本机保存；联网后自动同步。");
+  const [lastSyncSuccess, setLastSyncSuccess] = useState<string>();
+  const [lastSyncError, setLastSyncError] = useState<SyncErrorInfo>();
+  const [serverVersion, setServerVersion] = useState("读取中…");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<ToastState>();
   const syncClient = useMemo(() => new ServerSync(), []);
@@ -73,6 +79,7 @@ export function App() {
   const shareInboxChecked = useRef(false);
   const loadedNotes = useLiveQuery(async () => (await db.notes.orderBy("updatedAt").reverse().toArray()), []);
   const notes = loadedNotes ?? [];
+  const pendingSyncCount = useLiveQuery(() => db.events.count(), [], 0);
   const allAttachments = useLiveQuery(() => db.attachments.toArray(), [], []);
   const allSources = useLiveQuery(() => db.sources.toArray(), [], []);
   const attachments = useLiveQuery(async () => selectedID ? db.attachments.where("noteId").equals(selectedID).toArray() : [], [selectedID], []);
@@ -83,8 +90,12 @@ export function App() {
     void migrateLegacyLibrary().then(async () => {
       const savedDraft = await readLibraryMetadata<HomeDraft>(homeDraftKey);
       const savedSearches = await readLibraryMetadata<string[]>(recentSearchesKey);
+      const savedSyncSuccess = await readLibraryMetadata<string>(lastSyncSuccessKey);
+      const savedSyncError = await readLibraryMetadata<SyncErrorInfo>(lastSyncErrorKey);
       if (savedDraft) { setDraft(savedDraft.content); setContinuedFromID(savedDraft.continuedFromID); setCaptureSource(savedDraft.sourceURL); }
       if (Array.isArray(savedSearches)) setRecentSearches(savedSearches.filter(item => typeof item === "string").slice(0, 6));
+      if (typeof savedSyncSuccess === "string") setLastSyncSuccess(savedSyncSuccess);
+      if (savedSyncError?.message && savedSyncError.at) setLastSyncError(savedSyncError);
       setDraftLoaded(true); setDraftStatus("saved");
       try {
         const status = await authStatus();
@@ -179,6 +190,11 @@ export function App() {
     if (!settingsOpen || !passkeyConfigured) return;
     void listPasskeys().then(setPasskeys).catch(error => setPasskeyMessage(error instanceof Error ? error.message : "无法读取 Passkey"));
   }, [settingsOpen, passkeyConfigured]);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    setServerVersion("读取中…");
+    void serverInfo().then(info => setServerVersion(info.version || "未知")).catch(() => setServerVersion("无法连接"));
+  }, [settingsOpen]);
 
   const attachmentNoteIDs = new Set(allAttachments.map(item => item.noteId));
   const sourceNoteIDs = new Set(allSources.map(item => item.noteId));
@@ -216,9 +232,18 @@ export function App() {
 
   async function syncNow() {
     if (!authenticated || !navigator.onLine) return;
-    try { const count = await syncClient.sync(); setSyncStatus(count ? `已同步 ${count} 条本机变更。` : `已同步 · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`); }
+    try {
+      const count = await syncClient.sync();
+      const syncedAt = now();
+      setLastSyncSuccess(syncedAt);
+      void writeLibraryMetadata(lastSyncSuccessKey, syncedAt).catch(() => undefined);
+      setSyncStatus(count ? `已同步 ${count} 条本机变更。` : `已同步 · ${new Date(syncedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+    }
     catch (error) {
       const message = error instanceof Error ? error.message : "同步失败";
+      const failure = { message, at: now() };
+      setLastSyncError(failure);
+      void writeLibraryMetadata(lastSyncErrorKey, failure).catch(() => undefined);
       setSyncStatus(message);
       if (message === "需要登录") { setAuthenticated(false); localStorage.removeItem("thoughtglean.owner-authenticated"); }
     }
@@ -389,12 +414,52 @@ export function App() {
     }} type="search" placeholder="搜索标题、正文、来源和图片名" /><kbd>↑↓</kbd><kbd>↵</kbd></label><button className="button button-primary top-new" onClick={() => { showView(view === "trash" ? "recent" : view); requestAnimationFrame(() => captureInput.current?.focus()); }}><span>＋</span><span className="button-label">新记录</span></button></header>
     <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "最近"], ["starred", "星标"], ["all", "全部"], ["trash", "回收站"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key ? "active" : ""}`} onClick={() => showView(key)}>{label}</button>)}</nav><button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}>设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}<small>本机离线副本 · 服务端同步</small></span></div></aside>
       <main className="main-content">{selected ? <Detail note={selected} notes={notes} source={source} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => showView(view)} onSelect={showNote} onContinue={() => { setContinuedFromID(selected.id); showView(view); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} pastedImages={pastedImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => showView(view, true)} /> : <Library view={view} notes={visible} query={query} setQuery={setQuery} recentSearches={recentSearches} clearRecentSearches={() => { setRecentSearches([]); void deleteLibraryMetadata(recentSearchesKey); }} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} draft={draft} draftStatus={draftStatus} suggestedSource={suggestedSource} captureSource={captureSource} acceptSource={() => { setCaptureSource(suggestedSource); setSuggestedSource(undefined); }} dismissSource={() => setSuggestedSource(undefined)} removeSource={() => setCaptureSource(undefined)} continuedFromID={continuedFromID} setDraft={setDraft} clearContinuation={() => setContinuedFromID(undefined)} capture={() => void capture()} captureBusy={captureBusy} captureInput={captureInput} paste={event => void capturePastedImages(event)} open={showNote} update={update} restore={restore} />}</main></div>
-    {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="dialog-card settings-dialog" role="dialog" aria-modal="true" aria-label="设置"><header><div><p className="eyebrow">ThoughtGlean</p><h2>设置</h2></div><button className="text-button" onClick={() => setSettingsOpen(false)}>关闭</button></header><div className="settings-section"><h3>数据</h3><button className="button button-secondary" onClick={() => void downloadBackup()}>下载完整备份</button><button className="button button-secondary" onClick={() => void downloadMarkdown()}>导出 Markdown</button><button className="button button-secondary" onClick={() => backupInput.current?.click()}>恢复备份</button><input ref={backupInput} hidden type="file" accept="application/json,.json" onChange={event => void importBackup(event)} /></div><div className="settings-section"><h3>同步</h3><p className="muted">{syncStatus}</p><button className="button button-secondary" onClick={() => void syncNow()}>立即同步</button></div>{passkeyEnabled && <div className="settings-section passkey-section"><h3>Passkey</h3><p className="muted">{passkeyConfigured ? "使用指纹、面容或设备解锁登录，无需重复输入访问密钥。" : "为这台设备设置快速、安全的登录方式。"}</p>{passkeys.map((item, index) => <div className="passkey-row" key={item.id}><span><strong>Passkey {index + 1}</strong><small>添加于 {new Date(item.createdAt).toLocaleDateString()}</small></span>{passkeys.length > 1 && <button className="text-button danger" onClick={() => void removePasskey(item)}>删除</button>}</div>)}<button className="button button-secondary" disabled={passkeyBusy} onClick={() => void setupPasskey()}>{passkeyBusy ? "等待设备验证…" : passkeyConfigured ? "添加备用 Passkey" : "设置 Passkey"}</button>{passkeyMessage && <p className={passkeyMessage.includes("失败") || passkeyMessage.includes("无法") ? "inline-error" : "inline-success"}>{passkeyMessage}</p>}</div>}<div className="settings-section settings-danger"><button className="button button-secondary" onClick={() => void signOut()}>退出登录</button></div></section></div>}
+    {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+      <section className="dialog-card settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
+        <header><div><p className="eyebrow">ThoughtGlean</p><h2>设置</h2></div><button className="text-button" onClick={() => setSettingsOpen(false)}>关闭</button></header>
+        <div className="settings-section">
+          <h3>数据</h3>
+          <button className="button button-secondary" onClick={() => void downloadBackup()}>下载完整备份</button>
+          <button className="button button-secondary" onClick={() => void downloadMarkdown()}>导出 Markdown</button>
+          <button className="button button-secondary" onClick={() => backupInput.current?.click()}>恢复备份</button>
+          <input ref={backupInput} hidden type="file" accept="application/json,.json" onChange={event => void importBackup(event)} />
+        </div>
+        <div className="settings-section">
+          <h3>同步与运行状态</h3>
+          <p className="muted">{syncStatus}</p>
+          <dl className="diagnostic-grid">
+            <div><dt>待同步操作</dt><dd>{pendingSyncCount}</dd></div>
+            <div><dt>最近同步成功</dt><dd>{formatDiagnosticTime(lastSyncSuccess)}</dd></div>
+            <div><dt>本地数据</dt><dd>{notes.filter(note => !note.deletedAt).length} 条记录 · {allAttachments.length} 张图片</dd></div>
+            <div><dt>服务器版本</dt><dd>{serverVersion}</dd></div>
+          </dl>
+          <div className={`diagnostic-error ${lastSyncError ? "has-error" : ""}`}>
+            <span>最近同步错误</span>
+            <strong>{lastSyncError ? lastSyncError.message : "无"}</strong>
+            {lastSyncError && <small>{formatDiagnosticTime(lastSyncError.at)}</small>}
+          </div>
+          <button className="button button-secondary" onClick={() => void syncNow()}>立即同步</button>
+        </div>
+        {passkeyEnabled && <div className="settings-section passkey-section">
+          <h3>Passkey</h3>
+          <p className="muted">{passkeyConfigured ? "使用指纹、面容或设备解锁登录，无需重复输入访问密钥。" : "为这台设备设置快速、安全的登录方式。"}</p>
+          {passkeys.map((item, index) => <div className="passkey-row" key={item.id}><span><strong>Passkey {index + 1}</strong><small>添加于 {new Date(item.createdAt).toLocaleDateString()}</small></span>{passkeys.length > 1 && <button className="text-button danger" onClick={() => void removePasskey(item)}>删除</button>}</div>)}
+          <button className="button button-secondary" disabled={passkeyBusy} onClick={() => void setupPasskey()}>{passkeyBusy ? "等待设备验证…" : passkeyConfigured ? "添加备用 Passkey" : "设置 Passkey"}</button>
+          {passkeyMessage && <p className={passkeyMessage.includes("失败") || passkeyMessage.includes("无法") ? "inline-error" : "inline-success"}>{passkeyMessage}</p>}
+        </div>}
+        <div className="settings-section settings-danger"><button className="button button-secondary" onClick={() => void signOut()}>退出登录</button></div>
+      </section>
+    </div>}
     {toast && <aside className="toast" role="status"><span>{toast.message}</span>{toast.actions?.map(action => <button key={action.label} onClick={() => { action.run(); setToast(undefined); }}>{action.label}</button>)}</aside>}
   </div>;
 }
 
 const viewTitles: Record<View, string> = { recent: "最近", starred: "星标", all: "全部记录", trash: "回收站" };
+function formatDiagnosticTime(value?: string) {
+  if (!value) return "尚未同步";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "未知" : date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 const isConflict = (note: Note) => note.title.startsWith("同步冲突：") || note.title === "同步冲突记录";
 const supportedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const maxImageBytes = 20 * 1024 * 1024;

@@ -5,6 +5,7 @@ type Snapshot = { generatedAt: string; notes: Note[]; sources: NoteSource[]; att
 
 export type AuthStatus = { enabled: boolean; configured: boolean; authenticated: boolean; tokenLoginEnabled: boolean };
 export type PasskeyInfo = { id: string; createdAt: string; updatedAt: string };
+export type ServerInfo = { status: string; version: string };
 type CeremonyOptions = { ceremonyId: string; publicKey: Record<string, unknown> };
 
 async function api(path: string, init?: RequestInit) {
@@ -20,6 +21,12 @@ export async function authStatus(): Promise<AuthStatus> {
   const response = await fetch("/api/auth/status");
   if (!response.ok) throw new Error("无法连接服务器");
   return response.json() as Promise<AuthStatus>;
+}
+
+export async function serverInfo(): Promise<ServerInfo> {
+  const response = await fetch("/api/health", { cache: "no-store" });
+  if (!response.ok) throw new Error("无法读取服务器信息");
+  return response.json() as Promise<ServerInfo>;
 }
 
 export async function login(token: string) {
