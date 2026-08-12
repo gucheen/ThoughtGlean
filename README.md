@@ -99,6 +99,15 @@ docker compose exec server \
 
 `docker compose down` 不会删除数据；不要执行 `docker compose down -v`，除非明确要永久删除命名卷中的全部数据。
 
+## GitHub Actions 与 GHCR
+
+仓库内置 `.github/workflows/container.yml`：Pull Request 会执行前后端测试并验证两个 Docker 目标；推送到 `main`、推送 `v*` 版本标签或手动触发时，会构建 `linux/amd64` 与 `linux/arm64` 镜像并发布到：
+
+- `ghcr.io/gucheen/thoughtglean-server`
+- `ghcr.io/gucheen/thoughtglean-web`
+
+`main` 生成 `latest`、`main` 和提交 SHA 标签；`v1.2.3` 会生成 `1.2.3`、`1.2` 和提交 SHA 标签。流水线使用仓库自带的 `GITHUB_TOKEN` 发布，不需要额外配置 GHCR 密钥，并为发布镜像生成 provenance attestation。首次发布后，可在 GitHub Packages 设置中按需把镜像可见性调整为 Public。
+
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
