@@ -109,11 +109,24 @@ export async function saveNote(note: Note, shouldQueue = true) {
   await queue({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId });
 }
 
+export function fieldsFromQuickCapture(value: string) {
+  const lines = value.split(/\r?\n/);
+  const firstContentLine = lines.findIndex(line => line.trim() !== "");
+  const explicitTitle = firstContentLine >= 0 ? lines[firstContentLine].match(/^#\s+(.+?)\s*$/) : null;
+  if (explicitTitle) {
+    let bodyStart = firstContentLine + 1;
+    while (bodyStart < lines.length && lines[bodyStart].trim() === "") bodyStart += 1;
+    return { title: explicitTitle[1].trim().slice(0, 80), content: lines.slice(bodyStart).join("\n") };
+  }
+  return { title: value.trim().split(/\r?\n/, 1)[0].slice(0, 80) || "未命名记录", content: value };
+}
+
 export async function createNote(content: string, continuedFromId?: string) {
   const timestamp = now();
+  const fields = fieldsFromQuickCapture(content);
   const note: Note = {
-    id: newID(), syncId: newID(), title: content.trim().split("\n", 1)[0].slice(0, 80) || "未命名记录",
-    content, starred: false, continuedFromId, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    id: newID(), syncId: newID(), title: fields.title,
+    content: fields.content, starred: false, continuedFromId, revision: 1, createdAt: timestamp, updatedAt: timestamp,
   };
   await saveNote(note);
   return note;

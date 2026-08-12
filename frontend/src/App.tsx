@@ -331,7 +331,7 @@ function Library({ view, notes, query, searchFilter, setSearchFilter, conflictCo
     {view !== "trash" && <form className="capture-card" onSubmit={event => { event.preventDefault(); capture(); }}>
       {continuedFromID && <div className="continuation-chip"><span>续自记录</span><button type="button" aria-label="取消续写" onClick={clearContinuation}>×</button></div>}
       <textarea id="captureInput" value={draft} onChange={event => setDraft(event.target.value)} onPaste={paste} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); capture(); } }} placeholder={continuedFromID ? "继续写…" : "写下想法…"} />
-      <footer className="capture-footer"><span className="draft-state">草稿保存在当前浏览器</span><div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary">保存</button></div></footer>
+      <footer className="capture-footer"><span className="draft-state">草稿自动保存 · 首行 <code># 标题</code> 可设置标题</span><div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary">保存</button></div></footer>
     </form>}
     {notes.length ? <div className="timeline">{[...groups].map(([key, group]) => <DateGroup key={key} dateKey={key} notes={group} query={query} view={view} open={open} update={update} restore={restore} />)}</div> : <section className="empty-state"><h2>{view === "trash" ? "回收站是空的" : view === "starred" ? "还没有星标" : query || searchFilter !== "all" ? "没有匹配的记录" : "还没有记录"}</h2><p>{view === "trash" ? "删除的记录会保留在这里，可随时恢复。" : query || searchFilter !== "all" ? "换个关键词或筛选条件试试。" : "写下第一条内容。"}</p></section>}
   </section>;
