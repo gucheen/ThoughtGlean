@@ -64,8 +64,8 @@ button { cursor: pointer; }
 .note-row mark { padding: 0 1px; border-radius: 2px; color: inherit; background: #fef08a; }
 .capture-card { margin-bottom: 28px; padding: 16px 16px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .capture-card:focus-within { border-color: var(--accent); }
-.capture-card textarea { width: 100%; min-height: 76px; max-height: 260px; display: block; padding: 0; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.65; resize: vertical; }
-.capture-card.has-title-line textarea { width: calc(100% + 12px); margin-left: -6px; padding: 2px 6px; border-radius: 5px; background: linear-gradient(to bottom, var(--accent-wash) 0 30px, transparent 30px); }
+.capture-card textarea { width: 100%; min-height: 76px; max-height: 320px; display: block; padding: 0; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.65; resize: none; }
+.capture-card.has-title-line textarea { width: calc(100% + 12px); margin-left: -6px; padding: 2px 6px; border-radius: 5px; background: linear-gradient(to bottom, var(--accent-wash) 0 30px, transparent 30px) local; }
 .capture-footer { min-height: 38px; display: flex; align-items: end; justify-content: space-between; gap: 16px; padding-top: 10px; border-top: 1px solid var(--line); }
 .draft-state { color: var(--muted); font-size: 11px; }
 .draft-state i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #98a2b3; }

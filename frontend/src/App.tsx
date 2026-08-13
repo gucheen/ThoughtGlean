@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note } from "./db";
 import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, serverInfo, ServerSync, type PasskeyInfo } from "./sync";
@@ -18,6 +18,7 @@ const homeDraftKey = "draft.home.v1";
 const recentSearchesKey = "search.recent.v1";
 const lastSyncSuccessKey = "sync.last-success.v1";
 const lastSyncErrorKey = "sync.last-error.v1";
+const captureMaxHeight = 320;
 
 const viewPaths: Record<View, string> = { recent: "/", starred: "/starred", all: "/all", trash: "/trash" };
 
@@ -569,6 +570,13 @@ function RouteNotFound({ onBack }: { onBack: () => void }) {
 }
 
 function Library({ view, notes, query, setQuery, recentSearches, clearRecentSearches, searchHints, keyboardSelectedID, searchFilter, setSearchFilter, timeFilter, setTimeFilter, conflictCount, openFirstConflict, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, update, restore }: { view: View; notes: Note[]; query: string; setQuery: (value: string) => void; recentSearches: string[]; clearRecentSearches: () => void; searchHints: Map<string, string>; keyboardSelectedID?: string; searchFilter: SearchFilter; setSearchFilter: (value: SearchFilter) => void; timeFilter: TimeFilter; setTimeFilter: (value: TimeFilter) => void; conflictCount: number; openFirstConflict: () => void; draft: string; draftStatus: "idle" | "saving" | "saved"; suggestedSource?: string; captureSource?: string; acceptSource: () => void; dismissSource: () => void; removeSource: () => void; continuedFromID?: string; setDraft: (value: string) => void; clearContinuation: () => void; capture: () => void; captureBusy: boolean; captureInput: RefObject<HTMLTextAreaElement | null>; paste: (event: ClipboardEvent<HTMLTextAreaElement>) => void; open: (noteID: string) => void; update: (note: Note, patch: Partial<Note>) => Promise<void>; restore: (note: Note) => Promise<void> }) {
+  useLayoutEffect(() => { fitCaptureTextarea(captureInput.current); }, [captureInput, draft]);
+  useEffect(() => {
+    const resize = () => fitCaptureTextarea(captureInput.current);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [captureInput]);
+
   const groups = new Map<string, Note[]>();
   for (const note of notes) {
     const key = localDateKey(note.createdAt);
@@ -588,6 +596,13 @@ function Library({ view, notes, query, setQuery, recentSearches, clearRecentSear
     </form>}
     {notes.length ? <div className="timeline">{[...groups].map(([key, group]) => <DateGroup key={key} dateKey={key} notes={group} query={query} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} view={view} open={open} update={update} restore={restore} />)}</div> : <section className="empty-state"><h2>{view === "trash" ? "回收站是空的" : view === "starred" ? "还没有星标" : query || searchFilter !== "all" || timeFilter !== "any" ? "没有匹配的记录" : "还没有记录"}</h2><p>{view === "trash" ? "删除的记录会保留在这里，可随时恢复。" : query || searchFilter !== "all" || timeFilter !== "any" ? "换个关键词或筛选条件试试。" : "写下第一条内容。"}</p></section>}
   </section>;
+}
+
+function fitCaptureTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, captureMaxHeight)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > captureMaxHeight ? "auto" : "hidden";
 }
 
 function DateGroup({ dateKey, notes, query, searchHints, keyboardSelectedID, view, open, update, restore }: { dateKey: string; notes: Note[]; query: string; searchHints: Map<string, string>; keyboardSelectedID?: string; view: View; open: (noteID: string) => void; update: (note: Note, patch: Partial<Note>) => Promise<void>; restore: (note: Note) => Promise<void> }) {

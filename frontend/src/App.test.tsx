@@ -24,6 +24,27 @@ beforeEach(async () => {
 });
 
 describe("core note interactions", () => {
+  it("grows the capture textarea until its scroll limit", async () => {
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() { return this.value.length > 80 ? 500 : 120; },
+    });
+
+    try {
+      render(<App />);
+      const editor = await screen.findByPlaceholderText("写下想法…");
+      await waitFor(() => expect(editor).toHaveStyle({ height: "120px", overflowY: "hidden" }));
+
+      fireEvent.change(editor, { target: { value: `# 长标题\n${"较长的正文".repeat(30)}` } });
+      await waitFor(() => expect(editor).toHaveStyle({ height: "320px", overflowY: "auto" }));
+      expect(editor.closest("form")).toHaveClass("has-title-line");
+    } finally {
+      if (originalScrollHeight) Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", originalScrollHeight);
+      else Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+    }
+  });
+
   it("selects search results with the keyboard and opens with Enter", async () => {
     const timestamp = now();
     await saveNote({ id: "note-search-a", syncId: "sync-search-a-1234567890", title: "普通记录", content: "没有目标", starred: false, revision: 1, createdAt: timestamp, updatedAt: timestamp }, false);
