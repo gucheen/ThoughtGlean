@@ -19,8 +19,8 @@ import (
 	"unicode"
 
 	"github.com/go-webauthn/webauthn/webauthn"
-	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/text/unicode/norm"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed schema.sql
@@ -176,8 +176,13 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	dsn := path + "?_foreign_keys=on&_journal_mode=WAL&_synchronous=FULL&_busy_timeout=5000"
-	db, err := sql.Open("sqlite3", dsn)
+	parameters := url.Values{}
+	parameters.Add("_pragma", "busy_timeout(5000)")
+	parameters.Add("_pragma", "foreign_keys(ON)")
+	parameters.Add("_pragma", "journal_mode(WAL)")
+	parameters.Add("_pragma", "synchronous(FULL)")
+	dsn := path + "?" + parameters.Encode()
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

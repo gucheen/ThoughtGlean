@@ -21,6 +21,28 @@ func testStore(t *testing.T) *Store {
 	return store
 }
 
+func TestOpenConfiguresSQLite(t *testing.T) {
+	noteStore := testStore(t)
+	checks := []struct {
+		pragma string
+		want   string
+	}{
+		{"busy_timeout", "5000"},
+		{"foreign_keys", "1"},
+		{"journal_mode", "wal"},
+		{"synchronous", "2"},
+	}
+	for _, check := range checks {
+		var got string
+		if err := noteStore.db.QueryRow("PRAGMA " + check.pragma).Scan(&got); err != nil {
+			t.Fatalf("read PRAGMA %s: %v", check.pragma, err)
+		}
+		if got != check.want {
+			t.Errorf("PRAGMA %s = %q, want %q", check.pragma, got, check.want)
+		}
+	}
+}
+
 func TestPasskeyOwnerAndCredentialStorage(t *testing.T) {
 	noteStore := testStore(t)
 	ctx := context.Background()
