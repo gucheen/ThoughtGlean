@@ -2,11 +2,7 @@ name: thoughtglean
 
 services:
   server:
-    build:
-      context: .
-      target: server
-      args:
-        THOUGHTGLEAN_VERSION: ${THOUGHTGLEAN_VERSION:-0.1.0}
+    image: ghcr.io/gucheen/thoughtglean-server:latest
     restart: unless-stopped
     environment:
       THOUGHTGLEAN_ADDR: :8080
@@ -26,9 +22,7 @@ services:
       - no-new-privileges:true
 
   web:
-    build:
-      context: .
-      target: web
+    image: ghcr.io/gucheen/thoughtglean-web:latest
     restart: unless-stopped
     depends_on:
       server:
