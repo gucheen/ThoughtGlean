@@ -134,7 +134,7 @@ button { cursor: pointer; }
 .note-title-surface .note-title { margin-bottom: 0; }
 .plain-text { white-space: pre-wrap; }
 .note-title-input { width: 100%; margin: 0 0 22px; padding: 0; border: 0; outline: 0; background: transparent; font-size: 28px; font-weight: 720; letter-spacing: -.03em; }
-.note-editor { width: 100%; min-height: 380px; padding: 0; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.8; resize: vertical; }
+.note-editor { width: 100%; min-height: 380px; padding: 0; border: 0; outline: 0; overflow-y: hidden; background: transparent; font-size: 16px; line-height: 1.8; resize: none; }
 .editor-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
 .edit-actions .shortcut-hint { align-self: center; margin-right: auto; }

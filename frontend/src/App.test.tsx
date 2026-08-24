@@ -45,6 +45,32 @@ describe("core note interactions", () => {
     }
   });
 
+  it("grows the detail editor with its content instead of scrolling internally", async () => {
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() { return this.value.length > 40 ? 720 : 180; },
+    });
+
+    try {
+      const timestamp = now();
+      const content = "这是一段很长的正文".repeat(20);
+      await saveNote({ id: "note-long-editor", syncId: "sync-long-editor-123456", title: "长记录", content, starred: false, revision: 1, createdAt: timestamp, updatedAt: timestamp }, false);
+      history.replaceState(null, "", "/notes/note-long-editor");
+      render(<App />);
+
+      await userEvent.click(await screen.findByRole("button", { name: "编辑正文" }));
+      const editor = await screen.findByDisplayValue(content);
+      await waitFor(() => expect(editor).toHaveStyle({ height: "720px", overflowY: "hidden" }));
+
+      fireEvent.change(editor, { target: { value: "较短的正文" } });
+      await waitFor(() => expect(editor).toHaveStyle({ height: "180px", overflowY: "hidden" }));
+    } finally {
+      if (originalScrollHeight) Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", originalScrollHeight);
+      else Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+    }
+  });
+
   it("selects search results with the keyboard and opens with Enter", async () => {
     const timestamp = now();
     await saveNote({ id: "note-search-a", syncId: "sync-search-a-1234567890", title: "普通记录", content: "没有目标", starred: false, revision: 1, createdAt: timestamp, updatedAt: timestamp }, false);

@@ -660,6 +660,13 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
     }, 250);
     return () => clearTimeout(timer);
   }, [title, content, editing, editDraftLoaded, editDraftKey, note.title, note.content]);
+  useLayoutEffect(() => { if (editing) fitDetailTextarea(editor.current); }, [editing, content]);
+  useEffect(() => {
+    if (!editing) return;
+    const resize = () => fitDetailTextarea(editor.current);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [editing]);
   useEffect(() => { if (editing) requestAnimationFrame(() => (editFocus.current === "title" ? titleEditor.current : editor.current)?.focus()); }, [editing]);
   const save = async () => {
     if (mergingConflict && conflictParent) {
@@ -714,6 +721,13 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
     </article><aside className="context-rail"><h2>相关记录</h2><p className="context-copy">这条记录前后的内容。</p><div className="context-timeline">{context.map(item => <div className={`context-item ${item.id === note.id ? "current" : ""}`} key={item.id}><button onClick={() => item.id !== note.id && onSelect(item.id)}><time>{new Date(item.createdAt).toLocaleString()}</time><span>{item.title}</span></button></div>)}</div>{!note.deletedAt && <button className="button button-secondary button-wide" onClick={onContinue}>继续写</button>}</aside></div>
     {lightbox && <ImageLightbox items={attachments} selectedID={lightbox} onSelect={setLightbox} onClose={() => setLightbox(undefined)} />}
   </section>;
+}
+
+function fitDetailTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${textarea.scrollHeight}px`;
+  textarea.style.overflowY = "hidden";
 }
 
 function LimitedMarkdown({ content }: { content: string }) {
