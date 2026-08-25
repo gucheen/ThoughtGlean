@@ -27,6 +27,13 @@ async function receiveShare(request) {
   });
   return Response.redirect("/share", 303);
 }
+
+function cacheSuccessfulResponse(key, response) {
+  if (!response.ok) return;
+  const copy = response.clone();
+  void caches.open(CACHE).then(cache => cache.put(key, copy)).catch(() => undefined);
+}
+
 self.addEventListener("install", event => event.waitUntil(
   caches.has(LEGACY_CACHE).then(upgradingLegacy => upgradingLegacy ? self.skipWaiting() : undefined),
 ));
@@ -46,13 +53,13 @@ self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   if (url.pathname === "/" || event.request.mode === "navigate") {
     event.respondWith(fetch(event.request).then(response => {
-      if (response.ok) void caches.open(CACHE).then(cache => cache.put("/", response.clone()));
+      cacheSuccessfulResponse("/", response);
       return response;
     }).catch(() => caches.match(event.request).then(hit => hit || caches.match("/"))));
     return;
   }
   event.respondWith(caches.match(event.request).then(hit => hit || fetch(event.request).then(response => {
-    if (response.ok) void caches.open(CACHE).then(cache => cache.put(event.request, response.clone()));
+    cacheSuccessfulResponse(event.request, response);
     return response;
   })));
 });
