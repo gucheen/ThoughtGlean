@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/text/unicode/norm"
@@ -725,9 +726,14 @@ func (s *Store) ListNotes(ctx context.Context, opts ListOptions) ([]Note, error)
 		return nil, invalidInput("unknown view")
 	}
 	for _, token := range queryTokens(opts.Query) {
-		where = append(where, `(search_text LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM note_sources ns WHERE ns.note_id = notes.id AND ns.search_text LIKE ? ESCAPE '\'))`)
-		pattern := "%" + escapeLike(token) + "%"
-		args = append(args, pattern, pattern)
+		if utf8.RuneCountInString(token) >= 3 {
+			where = append(where, `id IN (SELECT note_id FROM note_search WHERE note_search MATCH ?)`)
+			args = append(args, fts5Phrase(token))
+		} else {
+			where = append(where, `(search_text LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM note_sources ns WHERE ns.note_id = notes.id AND ns.search_text LIKE ? ESCAPE '\'))`)
+			pattern := "%" + escapeLike(token) + "%"
+			args = append(args, pattern, pattern)
+		}
 	}
 	args = append(args, limit)
 	query := `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at
@@ -1384,6 +1390,10 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
+	var schemaVersion int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil {
+		return err
+	}
 
 	rows, err := tx.Query(`PRAGMA table_info(notes)`)
 	if err != nil {
@@ -1576,8 +1586,21 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`PRAGMA user_version = 2`); err != nil {
-		return err
+	if schemaVersion < 3 {
+		if _, err := tx.Exec(`DELETE FROM note_search`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO note_search(note_id, search_text)
+			SELECT n.id, n.search_text || char(10) || COALESCE(s.search_text, '')
+			FROM notes n LEFT JOIN note_sources s ON s.note_id = n.id`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO note_search(note_search) VALUES ('optimize')`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1603,4 +1626,8 @@ func queryTokens(query string) []string {
 func escapeLike(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return replacer.Replace(value)
+}
+
+func fts5Phrase(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }

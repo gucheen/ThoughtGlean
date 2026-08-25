@@ -135,9 +135,12 @@ button { cursor: pointer; }
 .plain-text { white-space: pre-wrap; }
 .note-title-input { width: 100%; margin: 0 0 22px; padding: 0; border: 0; outline: 0; background: transparent; font-size: 28px; font-weight: 720; letter-spacing: -.03em; }
 .note-editor { width: 100%; min-height: 380px; padding: 0; border: 0; outline: 0; overflow-y: hidden; background: transparent; font-size: 16px; line-height: 1.8; resize: none; }
-.editor-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
-.edit-actions .shortcut-hint { align-self: center; margin-right: auto; }
+.note-paper.is-editing { padding-bottom: 112px; }
+.editor-action-dock { position: fixed; z-index: 40; bottom: 20px; left: 50%; width: min(720px, calc(100vw - 280px)); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px; border: 1px solid #d0d5dd; border-radius: 11px; background: #ffffffed; box-shadow: 0 12px 36px #10182824; backdrop-filter: blur(14px); transform: translateX(-50%); }
+.editor-tools, .edit-actions { display: flex; align-items: center; gap: 8px; }
+.editor-tools { min-width: 0; flex-wrap: wrap; }
+.edit-actions { flex: 0 0 auto; justify-content: flex-end; }
+.edit-actions .shortcut-hint { margin-right: 4px; }
 .note-source { margin-top: 28px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .context-rail { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .context-rail h2 { margin: 0 0 7px; font-size: 16px; }
@@ -246,6 +249,13 @@ button { cursor: pointer; }
   .conflict-actions { justify-content: flex-start; }
   .conflict-compare { grid-template-columns: 1fr; }
   .note-detail-layout { grid-template-columns: 1fr; }
+  .note-paper.is-editing { padding-bottom: 92px; }
+  .editor-action-dock { right: 12px; bottom: calc(70px + env(safe-area-inset-bottom)); left: 12px; width: auto; gap: 8px; overflow: hidden; padding: 8px; transform: none; }
+  .editor-tools { flex: 1 1 auto; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .editor-tools::-webkit-scrollbar { display: none; }
+  .edit-actions { flex-wrap: nowrap; }
+  .editor-action-dock .button { min-height: 40px; padding: 0 12px; white-space: nowrap; }
+  .edit-actions .shortcut-hint { display: none; }
   .context-rail { margin-top: 0; }
   .date-group { display: block; }
   .date-heading { padding: 15px 14px 7px; }

@@ -74,6 +74,51 @@ CREATE TABLE IF NOT EXISTS note_sources (
     updated_at TEXT NOT NULL
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS note_search USING fts5(
+    note_id UNINDEXED,
+    search_text,
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_notes_search_insert
+AFTER INSERT ON notes BEGIN
+    INSERT INTO note_search(note_id, search_text)
+    VALUES (new.id, new.search_text || char(10) || COALESCE((SELECT search_text FROM note_sources WHERE note_id = new.id), ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_notes_search_update
+AFTER UPDATE OF search_text ON notes BEGIN
+    DELETE FROM note_search WHERE note_id = old.id;
+    INSERT INTO note_search(note_id, search_text)
+    VALUES (new.id, new.search_text || char(10) || COALESCE((SELECT search_text FROM note_sources WHERE note_id = new.id), ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_notes_search_delete
+AFTER DELETE ON notes BEGIN
+    DELETE FROM note_search WHERE note_id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_note_sources_search_insert
+AFTER INSERT ON note_sources BEGIN
+    DELETE FROM note_search WHERE note_id = new.note_id;
+    INSERT INTO note_search(note_id, search_text)
+    SELECT id, search_text || char(10) || new.search_text FROM notes WHERE id = new.note_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_note_sources_search_update
+AFTER UPDATE OF search_text ON note_sources BEGIN
+    DELETE FROM note_search WHERE note_id = new.note_id;
+    INSERT INTO note_search(note_id, search_text)
+    SELECT id, search_text || char(10) || new.search_text FROM notes WHERE id = new.note_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_note_sources_search_delete
+AFTER DELETE ON note_sources BEGIN
+    DELETE FROM note_search WHERE note_id = old.note_id;
+    INSERT INTO note_search(note_id, search_text)
+    SELECT id, search_text FROM notes WHERE id = old.note_id;
+END;
+
 CREATE TABLE IF NOT EXISTS note_attachments (
     id TEXT PRIMARY KEY,
     sync_id TEXT NOT NULL UNIQUE,

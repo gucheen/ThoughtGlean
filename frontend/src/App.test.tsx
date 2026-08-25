@@ -62,6 +62,11 @@ describe("core note interactions", () => {
       await userEvent.click(await screen.findByRole("button", { name: "编辑正文" }));
       const editor = await screen.findByDisplayValue(content);
       await waitFor(() => expect(editor).toHaveStyle({ height: "720px", overflowY: "hidden" }));
+      const actions = screen.getByRole("toolbar", { name: "编辑操作" });
+      expect(actions).toContainElement(screen.getByRole("button", { name: "插入代码片段" }));
+      expect(actions).toContainElement(screen.getByText("添加图片"));
+      expect(actions).toContainElement(screen.getByRole("button", { name: "取消" }));
+      expect(actions).toContainElement(screen.getByRole("button", { name: "保存修改" }));
 
       fireEvent.change(editor, { target: { value: "较短的正文" } });
       await waitFor(() => expect(editor).toHaveStyle({ height: "180px", overflowY: "hidden" }));

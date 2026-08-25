@@ -111,7 +111,7 @@ func TestCreateIsIdempotentAndSearchUsesAllTerms(t *testing.T) {
 		t.Fatalf("expected idempotency conflict with original note, got %v", err)
 	}
 
-	for _, query := range []string{"失败 原始", "SQLITE", "sqlite 数据"} {
+	for _, query := range []string{"失败 原始", "SQLITE", "QLI", "sqlite 数据"} {
 		notes, err := store.ListNotes(ctx, ListOptions{Query: query})
 		if err != nil || len(notes) != 1 || notes[0].ID != first.ID {
 			t.Fatalf("query %q returned %#v, %v", query, notes, err)
@@ -120,6 +120,41 @@ func TestCreateIsIdempotentAndSearchUsesAllTerms(t *testing.T) {
 	notes, err := store.ListNotes(ctx, ListOptions{Query: "失败 不存在"})
 	if err != nil || len(notes) != 0 {
 		t.Fatalf("AND query returned %#v, %v", notes, err)
+	}
+	changedContent := "更新后的正文改为 PostgreSQL"
+	updated, err := store.UpdateNote(ctx, first.ID, UpdateNoteInput{Content: &changedContent, ExpectedRevision: first.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for query, want := range map[string]int{"QLI": 0, "stgre": 1} {
+		notes, err = store.ListNotes(ctx, ListOptions{Query: query})
+		if err != nil || len(notes) != want {
+			t.Fatalf("updated FTS query %q returned %#v, %v", query, notes, err)
+		}
+	}
+
+	if _, err := store.SetNoteSource(ctx, updated.ID, NoteSource{URL: "https://example.com/reference", Title: "Architecture Reference"}); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = store.ListNotes(ctx, ListOptions{Query: "tectu"})
+	if err != nil || len(notes) != 1 || notes[0].ID != updated.ID {
+		t.Fatalf("FTS source query returned %#v, %v", notes, err)
+	}
+	if _, err := store.SetNoteSource(ctx, updated.ID, NoteSource{URL: "https://example.com/distributed", Title: "Distributed Systems"}); err != nil {
+		t.Fatal(err)
+	}
+	for query, want := range map[string]int{"tectu": 0, "tribu": 1} {
+		notes, err = store.ListNotes(ctx, ListOptions{Query: query})
+		if err != nil || len(notes) != want {
+			t.Fatalf("updated FTS source query %q returned %#v, %v", query, notes, err)
+		}
+	}
+	if _, err := store.SetNoteSource(ctx, updated.ID, NoteSource{}); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = store.ListNotes(ctx, ListOptions{Query: "tectu"})
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("deleted FTS source query returned %#v, %v", notes, err)
 	}
 }
 
@@ -143,6 +178,12 @@ func TestRequestHashMigrationPreservesIdempotency(t *testing.T) {
 	if _, err := legacy.db.Exec(`ALTER TABLE notes DROP COLUMN request_hash`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := legacy.db.Exec(`DELETE FROM note_search`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +199,10 @@ func TestRequestHashMigrationPreservesIdempotency(t *testing.T) {
 	}
 	if duplicate.SyncID != created.SyncID {
 		t.Fatalf("sync id changed after migration: %q != %q", duplicate.SyncID, created.SyncID)
+	}
+	found, err := migrated.ListNotes(context.Background(), ListOptions{Query: "迁移前"})
+	if err != nil || len(found) != 1 || found[0].ID != created.ID {
+		t.Fatalf("FTS migration search returned %#v, %v", found, err)
 	}
 	_, _, err = migrated.CreateNote(context.Background(), CreateNoteInput{RequestID: input.RequestID, Content: "另一段正文"})
 	var conflict *IdempotencyConflictError
