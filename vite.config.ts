@@ -37,6 +37,15 @@ export default defineConfig(({ mode }) => {
     emptyOutDir: true,
     assetsDir: "dist",
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "editor-core": ["@codemirror/state", "@codemirror/view", "@codemirror/commands"],
+          "editor-markdown": ["@codemirror/lang-markdown"],
+          "markdown": ["react-markdown", "remark-gfm"],
+        },
+      },
+    },
   },
   });
 });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { EditorView } from "@codemirror/view";
 import { App } from "./App";
 import { db, now, saveNote, writeLibraryMetadata, type Note } from "./db";
 
@@ -167,35 +168,152 @@ describe("core note interactions", () => {
     }
   });
 
-  it("grows the detail editor with its content instead of scrolling internally", async () => {
-    const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
-    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
-      configurable: true,
-      get() { return this.value.length > 40 ? 720 : 180; },
-    });
+  it("keeps the same editor and selection when switching between live preview and source", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const content = "## 标题\n\n这是一段 **需要保留** 的正文\n\n```js\nconst value = 1;\n```";
+    const note = noteFixture("editor", "编辑体验", now(), { content });
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const element = await screen.findByRole("textbox", { name: "正文编辑器" });
+    const editor = EditorView.findFromDOM(element)!;
+    expect(editor.state.doc.toString()).toBe(content);
+    act(() => editor.dispatch({ selection: { anchor: 12, head: 16 } }));
+    await userEvent.click(screen.getByRole("button", { name: "Markdown 源码" }));
+    expect(EditorView.findFromDOM(element)).toBe(editor);
+    expect(editor.state.selection.main).toMatchObject({ anchor: 12, head: 16 });
+    await userEvent.click(screen.getByRole("button", { name: "返回实时预览" }));
+    expect(editor.state.doc.toString()).toBe(content);
+    const actions = screen.getByRole("toolbar", { name: "编辑操作" });
+    expect(within(actions).getByRole("button", { name: "插入代码片段" })).toBeInTheDocument();
+    expect(within(actions).getByText("添加图片")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByRole("button", { name: "编辑" })).toBeInTheDocument();
+    expect(await db.notes.get(note.id)).toMatchObject({ content, revision: 1 });
+  });
 
-    try {
-      const timestamp = now();
-      const content = "这是一段很长的正文".repeat(20);
-      await saveNote({ id: "note-long-editor", syncId: "sync-long-editor-123456", title: "长记录", content, starred: false, revision: 1, createdAt: timestamp, updatedAt: timestamp }, false);
-      history.replaceState(null, "", "/notes/note-long-editor");
-      render(<App />);
+  it.each(["button", "shortcut"])("only enters editing explicitly via %s and carries a reading selection into the source document", async entry => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const content = "普通正文\n\n**选中的文字**\n\n```text\n代码区\n```";
+    const note = noteFixture("selection", "可选择的标题", now(), { content });
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("heading", { name: note.title }));
+    await userEvent.dblClick(screen.getByText("普通正文"));
+    await userEvent.click(screen.getByText("代码区"));
+    expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
+    const text = screen.getByText("选中的文字").firstChild!;
+    window.getSelection()!.setBaseAndExtent(text, 1, text, 4);
+    await waitFor(() => expect(screen.getByRole("button", { name: "编辑" })).toBeEnabled());
+    if (entry === "button") fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    else expect(fireEvent.keyDown(document.body, { key: "e" })).toBe(false);
+    const element = await screen.findByRole("textbox", { name: "正文编辑器" });
+    const editor = EditorView.findFromDOM(element)!;
+    expect(element).toHaveFocus();
+    expect(editor.state.sliceDoc()).toBe(content);
+    expect(editor.state.selection.main).toMatchObject({ anchor: content.indexOf("选中的文字") + 1, head: content.indexOf("选中的文字") + 4 });
+  });
 
-      await userEvent.click(await screen.findByRole("button", { name: "编辑正文" }));
-      const editor = await screen.findByDisplayValue(content);
-      await waitFor(() => expect(editor).toHaveStyle({ height: "720px", overflowY: "hidden" }));
-      const actions = screen.getByRole("toolbar", { name: "编辑操作" });
-      expect(actions).toContainElement(screen.getByRole("button", { name: "插入代码片段" }));
-      expect(actions).toContainElement(screen.getByText("添加图片"));
-      expect(actions).toContainElement(screen.getByRole("button", { name: "取消" }));
-      expect(actions).toContainElement(screen.getByRole("button", { name: "保存修改" }));
-
-      fireEvent.change(editor, { target: { value: "较短的正文" } });
-      await waitFor(() => expect(editor).toHaveStyle({ height: "180px", overflowY: "hidden" }));
-    } finally {
-      if (originalScrollHeight) Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", originalScrollHeight);
-      else Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+  it("ignores the edit shortcut while typing, composing, holding modifiers, or using a dialog", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("shortcut", "快捷编辑", now());
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "编辑" })).toBeEnabled());
+    for (const options of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }, { repeat: true }, { isComposing: true }, { keyCode: 229 }]) {
+      expect(fireEvent.keyDown(document.body, { key: "e", ...options })).toBe(true);
+      expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
     }
+    const handled = new KeyboardEvent("keydown", { key: "e", bubbles: true, cancelable: true });
+    handled.preventDefault();
+    fireEvent(document.body, handled);
+    fireEvent.keyDown(screen.getByRole("searchbox"), { key: "e" });
+    expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "关闭" }), { key: "e" });
+    expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.keyDown(document.body, { key: "E" });
+    const element = await screen.findByRole("textbox", { name: "正文编辑器" });
+    const editor = EditorView.findFromDOM(element)!;
+    act(() => editor.dispatch({ changes: { from: 0, insert: "修改" } }));
+    fireEvent.keyDown(element, { key: "e" });
+    expect(editor.state.sliceDoc()).toBe(`修改${note.content}`);
+    expect(EditorView.findFromDOM(element)).toBe(editor);
+  });
+
+  it("preserves a changed draft when immediately navigating away and restores it on return", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("draft-editor", "未完成的修改", now());
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const editor = EditorView.findFromDOM(await screen.findByRole("textbox", { name: "正文编辑器" }))!;
+    act(() => editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: "**保留这份草稿**" } }));
+    fireEvent.click(screen.getByRole("button", { name: "← 返回" }));
+    await userEvent.click(await screen.findByRole("button", { name: new RegExp(note.title) }));
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const restored = EditorView.findFromDOM(await screen.findByRole("textbox", { name: "正文编辑器" }))!;
+    expect(restored.state.sliceDoc()).toBe("**保留这份草稿**");
+    expect((await db.notes.get(note.id))?.content).toBe(note.content);
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(async () => expect((await db.notes.get(note.id))?.content).toBe("**保留这份草稿**"));
+    expect(await screen.findByRole("button", { name: "编辑" })).toBeInTheDocument();
+  });
+
+  it("keeps edits when cancellation is declined and discards them only after confirmation", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("cancel-editor", "取消修改", now());
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "记录标题" }), { target: { value: "修改后的标题" } });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      await userEvent.click(screen.getByRole("button", { name: "取消" }));
+      expect(screen.getByRole("textbox", { name: "记录标题" })).toHaveValue("修改后的标题");
+      confirm.mockReturnValue(true);
+      await userEvent.click(screen.getByRole("button", { name: "取消" }));
+      expect(await screen.findByRole("heading", { name: note.title })).toBeInTheDocument();
+      expect((await db.notes.get(note.id))?.title).toBe(note.title);
+    } finally { confirm.mockRestore(); }
+  });
+
+  it("does not offer editing for a trashed note", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("deleted-editor", "已删除记录", now(), { deletedAt: now() });
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await screen.findByRole("heading", { name: note.title });
+    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制 Markdown" })).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: "e" });
+    expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the editor and unsaved text open when local saving fails", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("failed-editor", "保存失败测试", now());
+    await saveNote(note, false);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const editor = EditorView.findFromDOM(await screen.findByRole("textbox", { name: "正文编辑器" }))!;
+    act(() => editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: "不能丢失的修改" } }));
+    const put = vi.spyOn(db.notes, "put").mockRejectedValueOnce(new Error("磁盘不可写"));
+    try {
+      await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("保存失败：磁盘不可写");
+      expect(EditorView.findFromDOM(screen.getByRole("textbox", { name: "正文编辑器" }))).toBe(editor);
+      expect(editor.state.sliceDoc()).toBe("不能丢失的修改");
+      expect((await db.notes.get(note.id))?.content).toBe(note.content);
+    } finally { put.mockRestore(); }
   });
 
   it("selects search results with the keyboard and opens with Enter", async () => {

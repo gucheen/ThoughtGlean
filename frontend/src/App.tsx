@@ -1,9 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type RefObject } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note } from "./db";
 import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, serverInfo, ServerSync, type PasskeyInfo } from "./sync";
 import { takeSharedItems, type SharedItem } from "./share";
 import { applyPWAUpdate, pwaUpdateEvent } from "./pwa";
+import { CopyButton, MarkdownContent, copyReadingSelection, readingSelection, readingViewport, restoreReadingViewport, type SourceSelection, type SourceViewport } from "./MarkdownContent";
+import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 
 type View = "recent" | "starred" | "all" | "trash";
 type SearchFilter = "all" | "images" | "code" | "source" | "conflicts";
@@ -297,10 +299,6 @@ export function App() {
     }
     if (!accepted.length) void syncNow();
   }
-  function pastedImages(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const images = [...event.clipboardData.files].filter(file => file.type.startsWith("image/"));
-    if (images.length) { event.preventDefault(); void addImages(images); }
-  }
   async function capturePastedImages(event: ClipboardEvent<HTMLTextAreaElement>) {
     const pastedText = event.clipboardData.getData("text/plain");
     const pastedURL = pastedText.match(/https?:\/\/[^\s<>"']+/i)?.[0];
@@ -414,7 +412,7 @@ export function App() {
       else if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); }
     }} type="search" placeholder="搜索标题、正文、来源和图片名" /><kbd>↑↓</kbd><kbd>↵</kbd></label><button className="button button-primary top-new" onClick={() => { showView(view === "trash" ? "recent" : view); requestAnimationFrame(() => captureInput.current?.focus()); }}><span>＋</span><span className="button-label">新记录</span></button></header>
     <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "最近"], ["starred", "星标"], ["all", "全部"], ["trash", "回收站"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key ? "active" : ""}`} onClick={() => showView(key)}>{label}</button>)}</nav><button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}>设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}<small>本机离线副本 · 服务端同步</small></span></div></aside>
-      <main className="main-content">{selected ? <Detail note={selected} notes={notes} source={source} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => showView(view)} onSelect={showNote} onContinue={() => { setContinuedFromID(selected.id); showView(view === "trash" ? "recent" : view); requestAnimationFrame(() => captureInput.current?.focus()); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} pastedImages={pastedImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => showView(view, true)} /> : <Library view={view} notes={visible} allNotes={notes} query={query} setQuery={setQuery} recentSearches={recentSearches} clearRecentSearches={() => { setRecentSearches([]); void deleteLibraryMetadata(recentSearchesKey); }} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} draft={draft} draftStatus={draftStatus} suggestedSource={suggestedSource} captureSource={captureSource} acceptSource={() => { setCaptureSource(suggestedSource); setSuggestedSource(undefined); }} dismissSource={() => setSuggestedSource(undefined)} removeSource={() => setCaptureSource(undefined)} continuedFromID={continuedFromID} setDraft={setDraft} clearContinuation={() => setContinuedFromID(undefined)} capture={() => void capture()} captureBusy={captureBusy} captureInput={captureInput} paste={event => void capturePastedImages(event)} open={showNote} update={update} restore={restore} />}</main></div>
+      <main className="main-content">{selected ? <Detail key={selected.id} note={selected} notes={notes} source={source} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => showView(view)} onSelect={showNote} onContinue={() => { setContinuedFromID(selected.id); showView(view === "trash" ? "recent" : view); requestAnimationFrame(() => captureInput.current?.focus()); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => showView(view, true)} /> : <Library view={view} notes={visible} allNotes={notes} query={query} setQuery={setQuery} recentSearches={recentSearches} clearRecentSearches={() => { setRecentSearches([]); void deleteLibraryMetadata(recentSearchesKey); }} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} draft={draft} draftStatus={draftStatus} suggestedSource={suggestedSource} captureSource={captureSource} acceptSource={() => { setCaptureSource(suggestedSource); setSuggestedSource(undefined); }} dismissSource={() => setSuggestedSource(undefined)} removeSource={() => setCaptureSource(undefined)} continuedFromID={continuedFromID} setDraft={setDraft} clearContinuation={() => setContinuedFromID(undefined)} capture={() => void capture()} captureBusy={captureBusy} captureInput={captureInput} paste={event => void capturePastedImages(event)} open={showNote} update={update} restore={restore} />}</main></div>
     {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
       <section className="dialog-card settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
         <header><div><p className="eyebrow">ThoughtGlean</p><h2>设置</h2></div><button className="text-button" onClick={() => setSettingsOpen(false)}>关闭</button></header>
@@ -632,14 +630,22 @@ function dateHeading(key: string) {
   return { label, detail: `${date.getFullYear()} 年 · ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]}` };
 }
 
-function Detail({ note, notes, source, attachments, editing, setEditing, onBack, onSelect, onContinue, saveSource, update, remove, restore, addImages, pastedImages }: { note: Note; notes: Note[]; source?: { url: string; title: string }; attachments: Attachment[]; editing: boolean; setEditing: (value: boolean) => void; onBack: () => void; onSelect: (noteID: string) => void; onContinue: () => void; saveSource: (url: string, title: string) => Promise<void>; update: (note: Note, patch: Partial<Note>) => Promise<void>; remove: (note: Note) => Promise<void>; restore: (note: Note) => Promise<void>; addImages: (files: FileList | File[]) => Promise<void>; pastedImages: (event: ClipboardEvent<HTMLTextAreaElement>) => void }) {
+function Detail({ note, notes, source, attachments, editing, setEditing, onBack, onSelect, onContinue, saveSource, update, remove, restore, addImages }: { note: Note; notes: Note[]; source?: { url: string; title: string }; attachments: Attachment[]; editing: boolean; setEditing: (value: boolean) => void; onBack: () => void; onSelect: (noteID: string) => void; onContinue: () => void; saveSource: (url: string, title: string) => Promise<void>; update: (note: Note, patch: Partial<Note>) => Promise<void>; remove: (note: Note) => Promise<void>; restore: (note: Note) => Promise<void>; addImages: (files: FileList | File[]) => Promise<void> }) {
   const [title, setTitle] = useState(note.title); const [content, setContent] = useState(note.content); const [lightbox, setLightbox] = useState<string>();
   const [editDraftLoaded, setEditDraftLoaded] = useState(false);
   const [hasEditDraft, setHasEditDraft] = useState(false);
   const [mergingConflict, setMergingConflict] = useState(false);
+  const [sourceMode, setSourceMode] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [editError, setEditError] = useState("");
   const titleEditor = useRef<HTMLInputElement>(null);
-  const editor = useRef<HTMLTextAreaElement>(null);
-  const editFocus = useRef<"title" | "body">("body");
+  const editor = useRef<MarkdownEditorHandle>(null);
+  const reader = useRef<HTMLDivElement>(null);
+  const initialSelection = useRef<SourceSelection>(undefined);
+  const initialViewport = useRef<SourceViewport>(undefined);
+  const readingScroll = useRef(0);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const draftWrites = useRef(Promise.resolve());
   const editDraftKey = `draft.note.${note.syncId}`;
   const conflictParent = isConflict(note) && note.continuedFromId ? notes.find(item => item.id === note.continuedFromId) : undefined;
   useEffect(() => {
@@ -657,54 +663,79 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
   }, [note.updatedAt, editing, editDraftLoaded, hasEditDraft]);
   useEffect(() => {
     if (!editing || !editDraftLoaded) return;
-    const timer = window.setTimeout(() => {
-      if (title !== note.title || content !== note.content) {
-        setHasEditDraft(true); void writeLibraryMetadata(editDraftKey, { title, content } satisfies EditDraft);
-      } else {
-        setHasEditDraft(false); void deleteLibraryMetadata(editDraftKey);
-      }
-    }, 250);
-    return () => clearTimeout(timer);
+    const changed = title !== note.title || content !== note.content;
+    setHasEditDraft(changed);
+    // Draft writes must finish in order and survive navigation.
+    draftWrites.current = draftWrites.current.then(async () => {
+      if (changed) await writeLibraryMetadata(editDraftKey, { title, content } satisfies EditDraft);
+      else await deleteLibraryMetadata(editDraftKey);
+    }).catch(() => setEditError("草稿未能保存在本机，请先不要关闭页面。"));
   }, [title, content, editing, editDraftLoaded, editDraftKey, note.title, note.content]);
-  useLayoutEffect(() => { if (editing) fitDetailTextarea(editor.current); }, [editing, content]);
-  useEffect(() => {
-    if (!editing) return;
-    const resize = () => fitDetailTextarea(editor.current);
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+  useLayoutEffect(() => {
+    if (editing) editor.current?.focus();
   }, [editing]);
-  useEffect(() => { if (editing) requestAnimationFrame(() => (editFocus.current === "title" ? titleEditor.current : editor.current)?.focus()); }, [editing]);
+  useEffect(() => {
+    const shortcut = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key.toLowerCase() !== "e") return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target?.isContentEditable || target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return;
+      const button = editButton.current;
+      if (!button || button.disabled) return;
+      event.preventDefault();
+      button.click();
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, []);
   const save = async () => {
-    if (mergingConflict && conflictParent) {
-      await update(conflictParent, { title: title.trim() || "未命名记录", content });
-      await update(note, { deletedAt: now() });
-      onSelect(conflictParent.id);
-    } else {
-      await update(note, { title: title.trim() || "未命名记录", content });
-    }
-    await deleteLibraryMetadata(editDraftKey); setHasEditDraft(false); setMergingConflict(false); setEditing(false);
+    if (saveBusy) return;
+    setSaveBusy(true); setEditError("");
+    const viewport = editor.current?.getViewport();
+    try {
+      if (mergingConflict && conflictParent) {
+        await update(conflictParent, { title: title.trim() || "未命名记录", content });
+        await update(note, { deletedAt: now() });
+        onSelect(conflictParent.id);
+      } else if (title !== note.title || content !== note.content) {
+        await update(note, { title: title.trim() || "未命名记录", content });
+      }
+      await draftWrites.current;
+      await deleteLibraryMetadata(editDraftKey); setHasEditDraft(false); setMergingConflict(false); setEditing(false);
+      requestAnimationFrame(() => { restoreReadingViewport(reader.current, viewport); editButton.current?.focus({ preventScroll: true }); });
+    } catch (error) {
+      setEditError(error instanceof Error ? `保存失败：${error.message}` : "保存失败，修改仍保留在编辑器中。");
+    } finally { setSaveBusy(false); }
   };
-  const cancel = () => { setTitle(note.title); setContent(note.content); setHasEditDraft(false); setMergingConflict(false); void deleteLibraryMetadata(editDraftKey); setEditing(false); };
-  const editorKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const cancel = () => {
+    if (saveBusy) return;
+    if ((title !== note.title || content !== note.content) && !confirm("放弃这次正文和标题的修改？")) return;
+    setTitle(note.title); setContent(note.content); setHasEditDraft(false); setMergingConflict(false); setEditError("");
+    draftWrites.current = draftWrites.current.then(() => deleteLibraryMetadata(editDraftKey)).catch(() => setEditError("草稿未能清除，请重新进入编辑后重试。")); setEditing(false);
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: readingScroll.current });
+      editButton.current?.focus({ preventScroll: true });
+    });
+  };
+  const editorKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
     if (event.key === "Escape") { event.preventDefault(); cancel(); }
     else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); }
   };
-  const beginEditing = (focus: "title" | "body" = "body") => { if (!note.deletedAt) { editFocus.current = focus; setEditing(true); } };
+  const beginEditing = () => {
+    if (!note.deletedAt && editDraftLoaded) {
+      initialSelection.current = content === note.content ? readingSelection(reader.current, note.content) : undefined;
+      initialViewport.current = content === note.content && window.scrollY > 0 ? readingViewport(reader.current) : undefined;
+      if (!initialSelection.current && initialViewport.current) initialSelection.current = { anchor: initialViewport.current.position, head: initialViewport.current.position };
+      readingScroll.current = window.scrollY;
+      setSourceMode(false); setEditError(""); setEditing(true);
+    }
+  };
   const beginConflictMerge = () => {
     if (!conflictParent) return;
     setMergingConflict(true); setTitle(conflictParent.title);
     setContent(conflictParent.content === note.content ? conflictParent.content : `${conflictParent.content}\n\n--- 另一设备版本 ---\n\n${note.content}`);
-    editFocus.current = "body"; setEditing(true);
-  };
-  const activateBodyEditor = (event: MouseEvent<HTMLDivElement>) => {
-    const selection = window.getSelection();
-    if ((event.target as Element).closest("a, button, pre, code, img") || (selection && !selection.isCollapsed)) return;
-    beginEditing();
-  };
-  const insertCode = () => {
-    const element = editor.current; const start = element?.selectionStart ?? content.length; const end = element?.selectionEnd ?? start;
-    const block = "```text\n\n```"; const next = `${content.slice(0, start)}${block}${content.slice(end)}`;
-    setContent(next); requestAnimationFrame(() => { element?.focus(); element?.setSelectionRange(start + 8, start + 8); });
+    initialSelection.current = undefined; setSourceMode(false); setEditing(true);
   };
   const editSource = async () => { const url = prompt("来源链接（留空移除）", source?.url || ""); if (url === null) return; const sourceTitle = url ? prompt("来源标题（可选）", source?.title || "") : ""; if (sourceTitle === null) return; await saveSource(url.trim(), sourceTitle.trim()); };
 
@@ -717,9 +748,9 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
     await update(note, { deletedAt: now() });
     onSelect(conflictParent.id);
   };
-  return <section className="detail-view"><header className="note-toolbar"><button className="text-button" onClick={onBack}>← 返回</button><div className="note-toolbar-actions"><button className="text-button" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger" onClick={() => void remove(note)}>移到回收站</button>}</div></header>
+  return <section className="detail-view"><header className="note-toolbar"><button className="text-button" onClick={onBack}>← 返回</button><div className="note-toolbar-actions">{editing && <div className="edit-actions">{editError && <span className="inline-error" role="alert">{editError}</span>}<span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" disabled={saveBusy} onClick={cancel}>取消</button><button className="button button-primary" disabled={saveBusy} onClick={() => void save()}>{saveBusy ? "保存中…" : mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div>}{!editing && <><CopyButton text={note.content} />{!note.deletedAt && !conflictParent && <button ref={editButton} className="button button-primary" disabled={!editDraftLoaded} aria-keyshortcuts="e" title="编辑（E）" onMouseDown={event => event.preventDefault()} onClick={beginEditing}>编辑<kbd className="button-shortcut" aria-hidden="true">E</kbd></button>}</>}<button className="text-button" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger" onClick={() => void remove(note)}>移到回收站</button>}</div></header>
     <div className="note-detail-layout"><article className={`note-paper ${editing ? "is-editing" : ""}`}>{isConflict(note) && <aside className="conflict-detail"><span><strong>{mergingConflict ? "合并两个版本" : "检测到另一设备的并发修改"}</strong><small>{mergingConflict ? "编辑合并后的正文并保存；完成后冲突记录会自动移入回收站。" : conflictParent ? `原版本“${conflictParent.title}”仍然保留，请明确选择处理方式。` : "原版本仍然保留，可编辑本记录完成手动合并。"}</small></span>{!editing && !note.deletedAt && <div className="conflict-actions">{conflictParent && <><button className="button button-secondary" onClick={() => void resolveConflict(false)}>保留当前</button><button className="button button-secondary" onClick={() => void resolveConflict(true)}>使用另一版本</button><button className="button button-primary" onClick={beginConflictMerge}>合并后保存</button></>}</div>}</aside>}<div className="note-origin"><time>{new Date(note.createdAt).toLocaleString()}</time><span>{editing ? mergingConflict ? "正在合并" : "编辑中" : "已保存在本机"}</span></div>
-      {editing ? <><input ref={titleEditor} className="note-title-input" value={title} onChange={event => setTitle(event.target.value)} onKeyDown={editorKeyDown} placeholder="标题（可选）" /><textarea ref={editor} className="note-editor" value={content} onChange={event => setContent(event.target.value)} onPaste={pastedImages} onKeyDown={editorKeyDown} /><div className="editor-action-dock" role="toolbar" aria-label="编辑操作"><div className="editor-tools"><button className="button button-secondary" onClick={insertCode}>插入代码片段</button><label className="button button-secondary">添加图片<input hidden type="file" accept="image/*" multiple onChange={event => { const files = event.target.files ? [...event.target.files] : []; event.target.value = ""; if (files.length) void addImages(files); }} /></label><button className="button button-secondary" onClick={() => void editSource()}>关联来源</button></div><div className="edit-actions"><span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" onClick={cancel}>取消</button><button className="button button-primary" onClick={() => void save()}>{mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div></div></> : conflictParent ? <section className="conflict-compare"><article><header><strong>当前版本</strong><time>{new Date(conflictParent.updatedAt).toLocaleString()}</time></header><h2>{conflictParent.title}</h2><div className="note-rendered"><LimitedMarkdown content={conflictParent.content} /></div></article><article><header><strong>另一设备版本</strong><time>{new Date(note.updatedAt).toLocaleString()}</time></header><h2>{note.title.replace(/^同步冲突：/, "")}</h2><div className="note-rendered"><LimitedMarkdown content={note.content} /></div></article></section> : <><div className="note-edit-surface note-title-surface" role="button" tabIndex={note.deletedAt ? -1 : 0} aria-label="编辑标题和正文" onClick={() => beginEditing("title")} onKeyDown={event => { if (event.key === "Enter") beginEditing("title"); }}><h1 className="note-title">{note.title}</h1></div><div className="note-edit-surface note-rendered" role="button" tabIndex={note.deletedAt ? -1 : 0} aria-label="编辑正文" onClick={activateBodyEditor} onKeyDown={event => { if (event.key === "Enter") beginEditing(); }}><LimitedMarkdown content={note.content} /></div></>}
+      {editing ? <><div className="editor-action-dock" role="toolbar" aria-label="编辑操作"><div className="editor-tools"><button className="button button-secondary" aria-pressed={sourceMode} onMouseDown={event => event.preventDefault()} onClick={() => { setSourceMode(value => !value); editor.current?.focus(); }}>{sourceMode ? "返回实时预览" : "Markdown 源码"}</button><button className="button button-secondary" onMouseDown={event => event.preventDefault()} onClick={() => editor.current?.insertCode()}>插入代码片段</button><label className="button button-secondary">添加图片<input hidden type="file" accept="image/*" multiple onChange={event => { const files = event.target.files ? [...event.target.files] : []; event.target.value = ""; if (files.length) void addImages(files); }} /></label><button className="button button-secondary" onClick={() => void editSource()}>关联来源</button></div></div><input ref={titleEditor} aria-label="记录标题" disabled={saveBusy} className="note-title-input" value={title} onChange={event => setTitle(event.target.value)} onKeyDown={editorKeyDown} placeholder="标题（可选）" /><MarkdownEditor ref={editor} value={content} onChange={setContent} sourceMode={sourceMode} disabled={saveBusy || !editDraftLoaded} initialSelection={initialSelection.current} initialViewport={initialViewport.current} onSave={() => void save()} onCancel={cancel} onPasteImages={files => void addImages(files)} /></> : conflictParent ? <section className="conflict-compare"><article><header><strong>当前版本</strong><time>{new Date(conflictParent.updatedAt).toLocaleString()}</time></header><h2>{conflictParent.title}</h2><div className="note-rendered"><MarkdownContent content={conflictParent.content} /></div></article><article><header><strong>另一设备版本</strong><time>{new Date(note.updatedAt).toLocaleString()}</time></header><h2>{note.title.replace(/^同步冲突：/, "")}</h2><div className="note-rendered"><MarkdownContent content={note.content} /></div></article></section> : <><h1 className="note-title">{note.title}</h1><div ref={reader} className="note-rendered" onCopy={copyReadingSelection}><MarkdownContent content={note.content} /></div></>}
       {source && <p className="note-source">来源：<a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a></p>}
       <section className="attachments">{attachments.map(item => <AttachmentPreview key={item.id} item={item} onOpen={() => setLightbox(item.id)} onEdit={editing ? async () => { const value = prompt("图片说明或替代文本（可选）", item.altText ?? ""); if (value !== null) await updateAttachmentAlt(item, value.trim().slice(0, 500)); } : undefined} onDelete={editing ? async () => { await deleteAttachment(item); } : undefined} />)}</section>
     </article><NoteContext note={note} notes={notes} onSelect={onSelect} onContinue={onContinue} /></div>
@@ -743,23 +774,6 @@ function NoteContext({ note, notes, onSelect, onContinue }: { note: Note; notes:
     </section>
     <section className="context-section" aria-label="当时的记录"><h2>当时的记录</h2><p className="context-copy">按创建时间查看前后记录，不表示续写关联。</p><div className="context-timeline">{context.map(item => <div className={`context-item ${item.id === note.id ? "current" : ""}`} key={item.id}><button aria-current={item.id === note.id ? "true" : undefined} onClick={() => item.id !== note.id && onSelect(item.id)}><time>{new Date(item.createdAt).toLocaleString()}</time><span>{item.title}</span></button></div>)}</div></section>
   </aside>;
-}
-
-function fitDetailTextarea(textarea: HTMLTextAreaElement | null) {
-  if (!textarea) return;
-  textarea.style.height = "auto";
-  textarea.style.height = `${textarea.scrollHeight}px`;
-  textarea.style.overflowY = "hidden";
-}
-
-function LimitedMarkdown({ content }: { content: string }) {
-  const blocks = content.split(/(^```[^\n]*\n[\s\S]*?^```\s*$)/m).filter(Boolean);
-  return <>{blocks.map((block, index) => {
-    const match = block.match(/^```([^\n]*)\n([\s\S]*?)^```\s*$/m);
-    if (!match) return <p key={index} className="plain-text">{block}</p>;
-    const language = match[1].trim() || "text"; const code = match[2];
-    return <section className="code-block" key={index}><header><span>{language}</span><button onClick={() => void navigator.clipboard?.writeText(code)}>复制</button></header><pre><code>{code}</code></pre></section>;
-  })}</>;
 }
 
 function AttachmentPreview({ item, onOpen, onEdit, onDelete }: { item: Attachment; onOpen: () => void; onEdit?: () => Promise<void>; onDelete?: () => Promise<void> }) {
