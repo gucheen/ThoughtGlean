@@ -22,6 +22,16 @@ describe("local persistence", () => {
     await expect(readLibraryMetadata("draft.home.v1")).resolves.toEqual({ content: "没有丢失的草稿", sourceURL: "https://example.com" });
   });
 
+  it("persists a continuation and queues its parent sync identity", async () => {
+    const parent = await createNote("最初的想法");
+    await db.events.clear();
+    const continuation = await createNote("接着想下去", parent.id);
+    expect(await db.notes.get(continuation.id)).toMatchObject({ continuedFromId: parent.id });
+    expect((await db.events.toArray())[0].payload).toMatchObject({
+      kind: "note.upsert", note: { id: continuation.id, continuedFromId: parent.id }, continuedFromSyncId: parent.syncId,
+    });
+  });
+
   it("queues an image for sync with its local blob", async () => {
     const note = await createNote("图片记录");
     await db.events.clear();

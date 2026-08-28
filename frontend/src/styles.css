@@ -78,8 +78,12 @@ button { cursor: pointer; }
 .capture-actions .button { white-space: nowrap; }
 .shortcut-hint { color: #9ca3af; font-size: 10px; white-space: nowrap; }
 .shortcut-hint kbd { padding: 1px 4px; border: 1px solid #d1d5db; border-radius: 4px; background: var(--paper); font-size: 9px; }
-.continuation-chip { width: fit-content; display: flex; align-items: center; gap: 6px; margin: -2px 0 10px; padding: 4px 6px 4px 9px; border-radius: 6px; color: var(--accent); background: var(--accent-wash); font-size: 11px; }
-.continuation-chip button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; }
+.continuation-chip { width: fit-content; max-width: 100%; display: flex; align-items: center; gap: 6px; margin: -2px 0 10px; padding: 4px 6px 4px 9px; border-radius: 6px; color: var(--accent); background: var(--accent-wash); font-size: 11px; }
+.continuation-chip > span { flex-shrink: 0; }
+.continuation-chip button { padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; }
+.continuation-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.continuation-source:hover { text-decoration: underline; }
+.continuation-cancel { flex: 0 0 24px; height: 24px; }
 .source-suggestion { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0 2px; padding: 9px 10px; border-radius: 7px; color: var(--soft); background: #f8fafc; font-size: 11px; }
 .source-suggestion span, .source-suggestion small { min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-suggestion small { margin-top: 3px; color: var(--muted); }
@@ -102,7 +106,7 @@ button { cursor: pointer; }
 .note-row-main { min-width: 0; }
 .note-row-title { display: block; margin-bottom: 4px; font-size: 14px; font-weight: 680; line-height: 1.45; }
 .note-excerpt { display: -webkit-box; overflow: hidden; color: var(--soft); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.note-meta { display: flex; gap: 8px; margin-top: 7px; color: var(--muted); font-size: 10px; }
+.note-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 7px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .relation-label { color: var(--accent); }
 .row-actions { align-self: start; display: flex; gap: 2px; margin: 14px 5px 0 0; opacity: 0; }
 .note-row:hover .row-actions, .note-row:focus-within .row-actions { opacity: 1; }
@@ -144,6 +148,15 @@ button { cursor: pointer; }
 .note-source { margin-top: 28px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .context-rail { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .context-rail h2 { margin: 0 0 7px; font-size: 16px; }
+.context-section + .context-section { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.continuation-group { margin-bottom: 16px; }
+.continuation-group h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: var(--soft); font-size: 11px; font-weight: 600; }
+.continuation-group h3 span { color: var(--muted); font-size: 10px; }
+.related-notes { display: grid; gap: 8px; }
+.related-note { display: block; width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent); background: transparent; text-align: left; }
+.related-note:hover { background: var(--accent-wash); border-color: var(--accent); }
+.related-note > span { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.related-note time, .related-note small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
 .context-copy { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .context-timeline { display: grid; margin-bottom: 16px; border-left: 1px solid #d1d5db; }
 .context-item { position: relative; min-width: 0; padding: 0 0 14px 13px; }

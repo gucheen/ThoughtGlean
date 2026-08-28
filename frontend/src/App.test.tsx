@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
-import { db, now, saveNote, type Note } from "./db";
+import { db, now, saveNote, writeLibraryMetadata, type Note } from "./db";
 
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+
+const noteFixture = (id: string, title: string, createdAt: string, patch: Partial<Note> = {}): Note => ({
+  id, syncId: `sync-${id}`, title, content: `${title}的正文`, starred: false, revision: 1, createdAt, updatedAt: createdAt, ...patch,
+});
 
 beforeEach(async () => {
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
@@ -24,6 +28,124 @@ beforeEach(async () => {
 });
 
 describe("core note interactions", () => {
+  it("separates direct continuations from temporal neighbors and navigates in both directions", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const root = noteFixture("root", "最初的想法", "2026-01-01T00:00:00Z");
+    const child = noteFixture("child", "几个月后的续写", "2026-06-01T00:00:00Z", { continuedFromId: root.id });
+    const sibling = noteFixture("sibling", "另一个方向", "2026-07-01T00:00:00Z", { continuedFromId: root.id });
+    const grandchild = noteFixture("grandchild", "继续深入", "2026-08-01T00:00:00Z", { continuedFromId: child.id });
+    const conflict = noteFixture("conflict", "同步冲突：最初的想法", "2026-06-01T01:00:00Z", { continuedFromId: root.id });
+    const removed = noteFixture("removed", "已删除的续写", "2026-06-01T02:00:00Z", { continuedFromId: root.id, deletedAt: now() });
+    const neighbors = [1, 2, 3].map(day => noteFixture(`neighbor-${day}`, `当时的其他记录 ${day}`, `2026-05-0${day}T00:00:00Z`));
+    await db.notes.bulkPut([sibling, grandchild, root, child, conflict, removed, ...neighbors]);
+    history.replaceState(null, "", `/notes/${child.id}`);
+    render(<App />);
+
+    const relations = await screen.findByRole("region", { name: "续写关系" });
+    expect(within(relations).getByRole("button", { name: /最初的想法/ })).toBeInTheDocument();
+    expect(within(relations).getByRole("button", { name: /继续深入/ })).toBeInTheDocument();
+    expect(within(relations).queryByText("另一个方向")).not.toBeInTheDocument();
+    const timeline = screen.getByRole("region", { name: "当时的记录" });
+    expect(within(timeline).queryByText(root.title)).not.toBeInTheDocument();
+    expect(within(timeline).getByText("当时的其他记录 3")).toBeInTheDocument();
+
+    await userEvent.click(within(relations).getByRole("button", { name: /最初的想法/ }));
+    expect(await screen.findByRole("heading", { level: 1, name: root.title })).toBeInTheDocument();
+    const rootRelations = screen.getByRole("region", { name: "续写关系" });
+    expect(within(rootRelations).getByRole("heading", { name: "后续续写2" })).toBeInTheDocument();
+    expect(within(rootRelations).getAllByRole("button").map(button => button.textContent)).toEqual([
+      expect.stringContaining(child.title), expect.stringContaining(sibling.title), "继续写",
+    ]);
+    await userEvent.click(within(rootRelations).getByRole("button", { name: /另一个方向/ }));
+    expect(await screen.findByRole("heading", { level: 1, name: sibling.title })).toBeInTheDocument();
+  });
+
+  it("saves a continuation with a visible source and allows returning to the original", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const original = noteFixture("capture-parent", "需要接着想的记录", "2026-01-01T00:00:00Z");
+    await saveNote(original, false);
+    history.replaceState(null, "", `/notes/${original.id}`);
+    const app = render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "继续写" }));
+    const editor = await screen.findByPlaceholderText("继续写…");
+    expect(screen.getByRole("button", { name: original.title })).toBeInTheDocument();
+    fireEvent.change(editor, { target: { value: "接着想出的新内容" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(async () => expect(await db.notes.count()).toBe(2));
+    const child = (await db.notes.toArray()).find(note => note.id !== original.id)!;
+    expect(child.continuedFromId).toBe(original.id);
+    expect(await screen.findByText(`续写自：${original.title}`)).toBeInTheDocument();
+    expect(screen.getByText("1 条后续续写")).toBeInTheDocument();
+    expect(await db.notes.get(original.id)).toMatchObject({ content: original.content, revision: 1 });
+
+    app.unmount();
+    history.replaceState(null, "", `/notes/${child.id}`);
+    render(<App />);
+    const relations = await screen.findByRole("region", { name: "续写关系" });
+    await userEvent.click(within(relations).getByRole("button", { name: new RegExp(original.title) }));
+    expect(await screen.findByRole("heading", { level: 1, name: original.title })).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "续写关系" })).getByRole("button", { name: /接着想出的新内容/ })).toBeInTheDocument();
+  });
+
+  it("keeps relation labels when the parent or children are filtered out", async () => {
+    const original = noteFixture("filtered-parent", "原始想法", "2026-01-01T00:00:00Z");
+    const child = noteFixture("filtered-child", "独特的后续", "2026-06-01T00:00:00Z", { continuedFromId: original.id });
+    await db.notes.bulkPut([original, child]);
+    render(<App />);
+    const search = await screen.findByRole("searchbox");
+    await userEvent.type(search, child.title);
+    expect(await screen.findByText(`续写自：${original.title}`)).toBeInTheDocument();
+    expect(screen.queryByText(original.title, { selector: ".note-row-title" })).not.toBeInTheDocument();
+    await userEvent.clear(search);
+    await userEvent.type(search, original.title);
+    expect(screen.getByText("1 条后续续写")).toBeInTheDocument();
+    expect(screen.queryByText(child.title, { selector: ".note-row-title" })).not.toBeInTheDocument();
+  });
+
+  it("restores the continuation source with a draft and can cancel the link without discarding text", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const original = noteFixture("draft-parent", "草稿的原记录", "2026-01-01T00:00:00Z");
+    await saveNote(original, false);
+    await writeLibraryMetadata("draft.home.v1", { content: "保留这段草稿", continuedFromID: original.id });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: original.title })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("继续写…")).toHaveValue("保留这段草稿");
+    await userEvent.click(screen.getByRole("button", { name: "取消续写" }));
+    expect(screen.getByPlaceholderText("写下想法…")).toHaveValue("保留这段草稿");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(async () => expect(await db.notes.count()).toBe(2));
+    expect((await db.notes.toArray()).find(note => note.id !== original.id)?.continuedFromId).toBeUndefined();
+  });
+
+  it("shows a deleted source and preserves the relation after restoring it", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const original = noteFixture("deleted-parent", "回收站里的原记录", "2026-01-01T00:00:00Z", { deletedAt: now() });
+    const child = noteFixture("active-child", "保留的续写", "2026-06-01T00:00:00Z", { continuedFromId: original.id });
+    await db.notes.bulkPut([original, child]);
+    history.replaceState(null, "", `/notes/${child.id}`);
+    render(<App />);
+    const relations = await screen.findByRole("region", { name: "续写关系" });
+    expect(within(relations).getByText("已在回收站")).toBeInTheDocument();
+    await userEvent.click(within(relations).getByRole("button", { name: /回收站里的原记录/ }));
+    const timeline = screen.getByRole("region", { name: "当时的记录" });
+    expect(within(timeline).getByRole("button", { name: /回收站里的原记录/ })).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByRole("button", { name: "继续写" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "恢复" }));
+    await waitFor(async () => expect((await db.notes.get(original.id))?.deletedAt).toBeUndefined());
+    expect((await db.notes.get(child.id))?.continuedFromId).toBe(original.id);
+  });
+
+  it("explains an unavailable source without treating a temporal neighbor as the parent", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const child = noteFixture("orphan", "来源暂不可用的续写", "2026-06-01T00:00:00Z", { continuedFromId: "missing" });
+    await db.notes.bulkPut([child, noteFixture("neighbor", "相邻记录", "2026-05-31T00:00:00Z")]);
+    history.replaceState(null, "", `/notes/${child.id}`);
+    render(<App />);
+    const relations = await screen.findByRole("region", { name: "续写关系" });
+    expect(within(relations).getByText("原记录暂不可用，关联仍保留。")).toBeInTheDocument();
+    expect(within(relations).queryByRole("button", { name: /相邻记录/ })).not.toBeInTheDocument();
+  });
+
   it("grows the capture textarea until its scroll limit", async () => {
     const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
     Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
