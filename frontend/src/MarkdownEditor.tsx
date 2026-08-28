@@ -3,7 +3,7 @@ import { Compartment, EditorState, StateField, Text, Transaction, type Range } f
 import { Decoration, EditorView, WidgetType, keymap, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { markdownKeymap, markdownLanguage } from "@codemirror/lang-markdown";
 import type { SourceSelection, SourceViewport } from "./MarkdownContent";
 
 class LabelWidget extends WidgetType {
@@ -43,8 +43,8 @@ class CodeHeaderWidget extends WidgetType {
 export function markdownDecorations(state: EditorState): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   const codeLines = new Set<number>();
-  const selection = state.selection.main;
-  const activeLine = selection.empty ? state.doc.lineAt(selection.head).number : -1;
+  // Keep syntax visible at the selection anchor so dragging does not move text under the pointer.
+  const activeLine = state.doc.lineAt(state.selection.main.anchor).number;
   const active = (position: number) => state.doc.lineAt(position).number === activeLine;
   const mark = (from: number, to: number, className: string) => {
     if (to > from) ranges.push(Decoration.mark({ class: className }).range(from, to));
@@ -116,9 +116,42 @@ export function markdownDecorations(state: EditorState): DecorationSet {
 
 const livePreview = StateField.define<DecorationSet>({
   create: markdownDecorations,
-  update: (decorations, transaction) => transaction.docChanged || transaction.selection || syntaxTree(transaction.startState) !== syntaxTree(transaction.state) ? markdownDecorations(transaction.state) : decorations,
+  update: (decorations, transaction) => {
+    const { startState, state } = transaction;
+    const activeLineChanged = startState.doc.lineAt(startState.selection.main.anchor).number !== state.doc.lineAt(state.selection.main.anchor).number;
+    return transaction.docChanged || activeLineChanged || syntaxTree(startState) !== syntaxTree(state) ? markdownDecorations(state) : decorations;
+  },
   provide: field => EditorView.decorations.from(field),
 });
+
+function previewExtensions(sourceMode: boolean) {
+  return [EditorView.editorAttributes.of({ class: sourceMode ? "is-source" : "is-live-preview" }), sourceMode ? syntaxHighlighting(defaultHighlightStyle) : livePreview];
+}
+
+function editorViewport(editor: EditorView): SourceViewport | undefined {
+  const bounds = editor.contentDOM.getBoundingClientRect();
+  const toolbar = editor.dom.closest(".detail-view")?.querySelector(".editor-action-dock");
+  const top = Math.max(bounds.top, (toolbar?.getBoundingClientRect().bottom ?? 0) + 12);
+  const position = editor.posAtCoords({ x: bounds.left + 8, y: top });
+  const coordinates = position === null ? null : editor.coordsAtPos(position);
+  return position !== null && coordinates ? { position, top: coordinates.top } : undefined;
+}
+
+function restoreEditorViewport(editor: EditorView, viewport: SourceViewport) {
+  const document = editor.state.doc;
+  let cancelled = false;
+  let frame = 0;
+  editor.requestMeasure({
+    read: view => view.coordsAtPos(Math.min(viewport.position, view.state.doc.length)),
+    // Restore after CodeMirror finishes its own scroll anchoring for this measurement.
+    write: () => { if (!cancelled) frame = requestAnimationFrame(() => {
+      if (cancelled || editor.state.doc !== document) return;
+      const coordinates = editor.coordsAtPos(viewport.position);
+      if (coordinates) window.scrollBy({ top: coordinates.top - viewport.top });
+    }); },
+  });
+  return () => { cancelled = true; cancelAnimationFrame(frame); };
+}
 
 export type MarkdownEditorHandle = {
   focus: () => void;
@@ -150,6 +183,7 @@ export function MarkdownEditor({ ref, ...props }: Props) {
   callbacks.current = props;
   const preview = useRef(new Compartment());
   const editable = useRef(new Compartment());
+  const sourceMode = useRef(props.sourceMode);
   useImperativeHandle(ref, () => ({
     focus: () => view.current?.contentDOM.focus({ preventScroll: true }),
     getSelection: () => {
@@ -160,10 +194,8 @@ export function MarkdownEditor({ ref, ...props }: Props) {
     getViewport: () => {
       const editor = view.current;
       if (!editor) return;
-      const bounds = editor.contentDOM.getBoundingClientRect();
-      const position = editor.posAtCoords({ x: bounds.left + 8, y: Math.max(280, bounds.top) });
-      const coordinates = position === null ? null : editor.coordsAtPos(position);
-      return position !== null && coordinates ? { position: sourceOffset(editor.state, position), top: coordinates.top } : undefined;
+      const viewport = editorViewport(editor);
+      return viewport ? { ...viewport, position: sourceOffset(editor.state, viewport.position) } : undefined;
     },
     insertCode: () => {
       const editor = view.current;
@@ -181,6 +213,7 @@ export function MarkdownEditor({ ref, ...props }: Props) {
 
   useLayoutEffect(() => {
     const initial = callbacks.current;
+    sourceMode.current = initial.sourceMode;
     const editor = new EditorView({
       parent: host.current!,
       state: EditorState.create({
@@ -189,15 +222,16 @@ export function MarkdownEditor({ ref, ...props }: Props) {
         extensions: [
           EditorState.lineSeparator.of(initial.value.includes("\r\n") ? "\r\n" : "\n"),
           history(),
-          markdown({ base: markdownLanguage, completeHTMLTags: false, pasteURLAsLink: false }),
+          // Markdown only: embedded HTML languages and completion are not needed for notes.
+          markdownLanguage,
           EditorView.lineWrapping,
           EditorView.contentAttributes.of({ "aria-label": "正文编辑器", "aria-multiline": "true", spellcheck: "false" }),
           keymap.of([
             { key: "Mod-Enter", run: editor => { if (editor.compositionStarted) return false; callbacks.current.onSave(); return true; } },
             { key: "Escape", run: editor => { if (editor.compositionStarted) return false; callbacks.current.onCancel(); return true; } },
-            ...defaultKeymap, ...historyKeymap,
+            ...markdownKeymap, ...defaultKeymap, ...historyKeymap,
           ]),
-          preview.current.of(callbacks.current.sourceMode ? syntaxHighlighting(defaultHighlightStyle) : livePreview),
+          preview.current.of(previewExtensions(initial.sourceMode)),
           editable.current.of([EditorState.readOnly.of(Boolean(callbacks.current.disabled)), EditorView.editable.of(!callbacks.current.disabled)]),
           EditorView.updateListener.of(update => {
             if (update.docChanged) callbacks.current.onChange(update.state.sliceDoc());
@@ -213,19 +247,8 @@ export function MarkdownEditor({ ref, ...props }: Props) {
     view.current = editor;
     editor.contentDOM.focus({ preventScroll: true });
     const viewport = initial.initialViewport;
-    let restoreFrame = 0;
-    if (viewport) {
-      const position = Math.min(documentOffset(initial.value, viewport.position), editor.state.doc.length);
-      editor.requestMeasure({
-        read: view => view.coordsAtPos(position),
-        // Restore after CodeMirror finishes its own scroll anchoring for this measurement.
-        write: () => { restoreFrame = requestAnimationFrame(() => {
-          const coordinates = editor.coordsAtPos(position);
-          if (coordinates) window.scrollBy({ top: coordinates.top - viewport.top });
-        }); },
-      });
-    }
-    return () => { cancelAnimationFrame(restoreFrame); editor.destroy(); view.current = null; };
+    const cancelRestore = viewport ? restoreEditorViewport(editor, { ...viewport, position: Math.min(documentOffset(initial.value, viewport.position), editor.state.doc.length) }) : undefined;
+    return () => { cancelRestore?.(); editor.destroy(); view.current = null; };
   }, []);
 
   useLayoutEffect(() => {
@@ -238,15 +261,16 @@ export function MarkdownEditor({ ref, ...props }: Props) {
 
   useLayoutEffect(() => {
     const editor = view.current;
-    if (!editor) return;
-    const scrollY = window.scrollY;
-    editor.dispatch({ effects: preview.current.reconfigure(props.sourceMode ? syntaxHighlighting(defaultHighlightStyle) : livePreview) });
-    window.scrollTo({ top: scrollY });
+    if (!editor || sourceMode.current === props.sourceMode) return;
+    sourceMode.current = props.sourceMode;
+    const viewport = window.scrollY > 0 ? editorViewport(editor) : undefined;
+    editor.dispatch({ effects: preview.current.reconfigure(previewExtensions(props.sourceMode)) });
+    return viewport ? restoreEditorViewport(editor, viewport) : undefined;
   }, [props.sourceMode]);
 
   useLayoutEffect(() => {
     view.current?.dispatch({ effects: editable.current.reconfigure([EditorState.readOnly.of(Boolean(props.disabled)), EditorView.editable.of(!props.disabled)]) });
   }, [props.disabled]);
 
-  return <div ref={host} className={`markdown-editor ${props.sourceMode ? "is-source" : "is-live-preview"}`} />;
+  return <div ref={host} className="markdown-editor" />;
 }
