@@ -404,7 +404,7 @@ export function App() {
     <footer className="auth-gate-footer">个人应用 · 数据仅向你的服务器同步</footer>
   </form></main>;
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${selected && editing ? "is-detail-editing" : ""}`}>
     <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong></span></button><label className="search-box"><span className="search-icon" aria-hidden="true" /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
       if (event.key === "ArrowDown" && visible.length) { event.preventDefault(); setSearchSelection(current => (current + 1) % visible.length); }
       else if (event.key === "ArrowUp" && visible.length) { event.preventDefault(); setSearchSelection(current => (current - 1 + visible.length) % visible.length); }
@@ -636,6 +636,8 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
   const [hasEditDraft, setHasEditDraft] = useState(false);
   const [mergingConflict, setMergingConflict] = useState(false);
   const [sourceMode, setSourceMode] = useState(false);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+  const [mobileNoteActionsOpen, setMobileNoteActionsOpen] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [editError, setEditError] = useState("");
   const titleEditor = useRef<HTMLInputElement>(null);
@@ -646,6 +648,8 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
   const readingScroll = useRef(0);
   const editButton = useRef<HTMLButtonElement>(null);
   const draftWrites = useRef(Promise.resolve());
+  const editorTools = useRef<HTMLDivElement>(null);
+  const noteActions = useRef<HTMLDivElement>(null);
   const editDraftKey = `draft.note.${note.syncId}`;
   const conflictParent = isConflict(note) && note.continuedFromId ? notes.find(item => item.id === note.continuedFromId) : undefined;
   useEffect(() => {
@@ -671,6 +675,22 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
       else await deleteLibraryMetadata(editDraftKey);
     }).catch(() => setEditError("草稿未能保存在本机，请先不要关闭页面。"));
   }, [title, content, editing, editDraftLoaded, editDraftKey, note.title, note.content]);
+  useEffect(() => {
+    if (!mobileToolsOpen) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && !editorTools.current?.contains(event.target)) setMobileToolsOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [mobileToolsOpen]);
+  useEffect(() => {
+    if (!mobileNoteActionsOpen) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && !noteActions.current?.contains(event.target)) setMobileNoteActionsOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [mobileNoteActionsOpen]);
   useLayoutEffect(() => {
     if (editing) editor.current?.focus();
   }, [editing]);
@@ -728,7 +748,7 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
       initialViewport.current = content === note.content && window.scrollY > 0 ? readingViewport(reader.current) : undefined;
       if (!initialSelection.current && initialViewport.current) initialSelection.current = { anchor: initialViewport.current.position, head: initialViewport.current.position };
       readingScroll.current = window.scrollY;
-      setSourceMode(false); setEditError(""); setEditing(true);
+      setSourceMode(false); setMobileNoteActionsOpen(false); setEditError(""); setEditing(true);
     }
   };
   const beginConflictMerge = () => {
@@ -748,9 +768,9 @@ function Detail({ note, notes, source, attachments, editing, setEditing, onBack,
     await update(note, { deletedAt: now() });
     onSelect(conflictParent.id);
   };
-  return <section className="detail-view"><header className="note-toolbar"><button className="text-button" onClick={onBack}>← 返回</button><div className="note-toolbar-actions">{editing && <div className="edit-actions">{editError && <span className="inline-error" role="alert">{editError}</span>}<span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" disabled={saveBusy} onClick={cancel}>取消</button><button className="button button-primary" disabled={saveBusy} onClick={() => void save()}>{saveBusy ? "保存中…" : mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div>}{!editing && <><CopyButton text={note.content} />{!note.deletedAt && !conflictParent && <button ref={editButton} className="button button-primary" disabled={!editDraftLoaded} aria-keyshortcuts="e" title="编辑（E）" onMouseDown={event => event.preventDefault()} onClick={beginEditing}>编辑<kbd className="button-shortcut" aria-hidden="true">E</kbd></button>}</>}<button className="text-button" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger" onClick={() => void remove(note)}>移到回收站</button>}</div></header>
+  return <section className="detail-view"><header className={`note-toolbar ${editing ? "is-editing" : ""}`}><button className="text-button note-back" onClick={onBack}>← 返回</button><div className="note-toolbar-actions">{editing && <div className="edit-actions">{editError && <span className="inline-error" role="alert">{editError}</span>}<span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" disabled={saveBusy} onClick={cancel}>取消</button><button className="button button-primary" disabled={saveBusy} onClick={() => void save()}>{saveBusy ? "保存中…" : mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div>}{!editing ? <>{!note.deletedAt && !conflictParent && <button ref={editButton} className="button button-primary note-edit-action" disabled={!editDraftLoaded} aria-keyshortcuts="e" title="编辑（E）" onMouseDown={event => event.preventDefault()} onClick={beginEditing}>编辑<kbd className="button-shortcut" aria-hidden="true">E</kbd></button>}<div ref={noteActions} className="mobile-note-actions"><button className="text-button mobile-note-actions-toggle" aria-expanded={mobileNoteActionsOpen} aria-controls="mobile-note-actions-menu" onClick={() => setMobileNoteActionsOpen(value => !value)}>更多</button><div id="mobile-note-actions-menu" className="mobile-note-actions-menu" data-open={mobileNoteActionsOpen} role="group" aria-label="更多操作" onClick={() => setMobileNoteActionsOpen(false)}><span className="note-copy-action"><CopyButton text={note.content} /></span><button className="text-button note-secondary-action" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button note-secondary-action" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger note-secondary-action" onClick={() => void remove(note)}>移到回收站</button>}</div></div></> : <span className="note-desktop-secondary"><button className="text-button note-secondary-action" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button note-secondary-action" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger note-secondary-action" onClick={() => void remove(note)}>移到回收站</button>}</span>}</div></header>
     <div className="note-detail-layout"><article className={`note-paper ${editing ? "is-editing" : ""}`}>{isConflict(note) && <aside className="conflict-detail"><span><strong>{mergingConflict ? "合并两个版本" : "检测到另一设备的并发修改"}</strong><small>{mergingConflict ? "编辑合并后的正文并保存；完成后冲突记录会自动移入回收站。" : conflictParent ? `原版本“${conflictParent.title}”仍然保留，请明确选择处理方式。` : "原版本仍然保留，可编辑本记录完成手动合并。"}</small></span>{!editing && !note.deletedAt && <div className="conflict-actions">{conflictParent && <><button className="button button-secondary" onClick={() => void resolveConflict(false)}>保留当前</button><button className="button button-secondary" onClick={() => void resolveConflict(true)}>使用另一版本</button><button className="button button-primary" onClick={beginConflictMerge}>合并后保存</button></>}</div>}</aside>}<div className="note-origin"><time>{new Date(note.createdAt).toLocaleString()}</time><span>{editing ? mergingConflict ? "正在合并" : "编辑中" : "已保存在本机"}</span></div>
-      {editing ? <><div className="editor-action-dock" role="toolbar" aria-label="编辑操作"><div className="editor-tools"><button className="button button-secondary" aria-pressed={sourceMode} onMouseDown={event => event.preventDefault()} onClick={() => { setSourceMode(value => !value); editor.current?.focus(); }}>{sourceMode ? "返回实时预览" : "Markdown 源码"}</button><button className="button button-secondary" onMouseDown={event => event.preventDefault()} onClick={() => editor.current?.insertCode()}>插入代码片段</button><label className="button button-secondary">添加图片<input hidden type="file" accept="image/*" multiple onChange={event => { const files = event.target.files ? [...event.target.files] : []; event.target.value = ""; if (files.length) void addImages(files); }} /></label><button className="button button-secondary" onClick={() => void editSource()}>关联来源</button></div></div><input ref={titleEditor} aria-label="记录标题" disabled={saveBusy} className="note-title-input" value={title} onChange={event => setTitle(event.target.value)} onKeyDown={editorKeyDown} placeholder="标题（可选）" /><MarkdownEditor ref={editor} value={content} onChange={setContent} sourceMode={sourceMode} disabled={saveBusy || !editDraftLoaded} initialSelection={initialSelection.current} initialViewport={initialViewport.current} onSave={() => void save()} onCancel={cancel} onPasteImages={files => void addImages(files)} /></> : conflictParent ? <section className="conflict-compare"><article><header><strong>当前版本</strong><time>{new Date(conflictParent.updatedAt).toLocaleString()}</time></header><h2>{conflictParent.title}</h2><div className="note-rendered"><MarkdownContent content={conflictParent.content} /></div></article><article><header><strong>另一设备版本</strong><time>{new Date(note.updatedAt).toLocaleString()}</time></header><h2>{note.title.replace(/^同步冲突：/, "")}</h2><div className="note-rendered"><MarkdownContent content={note.content} /></div></article></section> : <><h1 className="note-title">{note.title}</h1><div ref={reader} className="note-rendered" onCopy={copyReadingSelection}><MarkdownContent content={note.content} /></div></>}
+      {editing ? <><div ref={editorTools} className="editor-action-dock" role="toolbar" aria-label="编辑操作"><button className="button button-secondary mobile-editor-tools-toggle" aria-expanded={mobileToolsOpen} aria-controls="editor-tools-menu" onMouseDown={event => event.preventDefault()} onClick={() => setMobileToolsOpen(value => !value)}>工具</button><div id="editor-tools-menu" className="editor-tools" data-mobile-open={mobileToolsOpen}><button className="button button-secondary" aria-pressed={sourceMode} onMouseDown={event => event.preventDefault()} onClick={() => { setMobileToolsOpen(false); setSourceMode(value => !value); editor.current?.focus(); }}>{sourceMode ? "返回实时预览" : "Markdown 源码"}</button><button className="button button-secondary" onMouseDown={event => event.preventDefault()} onClick={() => { setMobileToolsOpen(false); editor.current?.insertCode(); }}>插入代码片段</button><label className="button button-secondary">添加图片<input hidden type="file" accept="image/*" multiple onChange={event => { const files = event.target.files ? [...event.target.files] : []; event.target.value = ""; setMobileToolsOpen(false); if (files.length) void addImages(files); }} /></label><button className="button button-secondary" onClick={() => { setMobileToolsOpen(false); void editSource(); }}>关联来源</button></div></div><input ref={titleEditor} aria-label="记录标题" disabled={saveBusy} className="note-title-input" value={title} onChange={event => setTitle(event.target.value)} onKeyDown={editorKeyDown} enterKeyHint="next" placeholder="标题（可选）" /><MarkdownEditor ref={editor} value={content} onChange={setContent} sourceMode={sourceMode} disabled={saveBusy || !editDraftLoaded} initialSelection={initialSelection.current} initialViewport={initialViewport.current} onSave={() => void save()} onCancel={cancel} onPasteImages={files => void addImages(files)} /></> : conflictParent ? <section className="conflict-compare"><article><header><strong>当前版本</strong><time>{new Date(conflictParent.updatedAt).toLocaleString()}</time></header><h2>{conflictParent.title}</h2><div className="note-rendered"><MarkdownContent content={conflictParent.content} /></div></article><article><header><strong>另一设备版本</strong><time>{new Date(note.updatedAt).toLocaleString()}</time></header><h2>{note.title.replace(/^同步冲突：/, "")}</h2><div className="note-rendered"><MarkdownContent content={note.content} /></div></article></section> : <><h1 className="note-title">{note.title}</h1><div ref={reader} className="note-rendered" onCopy={copyReadingSelection}><MarkdownContent content={note.content} /></div></>}
       {source && <p className="note-source">来源：<a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a></p>}
       <section className="attachments">{attachments.map(item => <AttachmentPreview key={item.id} item={item} onOpen={() => setLightbox(item.id)} onEdit={editing ? async () => { const value = prompt("图片说明或替代文本（可选）", item.altText ?? ""); if (value !== null) await updateAttachmentAlt(item, value.trim().slice(0, 500)); } : undefined} onDelete={editing ? async () => { await deleteAttachment(item); } : undefined} />)}</section>
     </article><NoteContext note={note} notes={notes} onSelect={onSelect} onContinue={onContinue} /></div>
