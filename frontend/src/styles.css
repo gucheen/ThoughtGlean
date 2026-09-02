@@ -298,8 +298,13 @@ button { cursor: pointer; }
 .toast button { padding: 2px 4px; border: 0; color: #93c5fd; background: transparent; font-weight: 700; }
 
 @media (max-width: 720px) {
-  .topbar { height: auto; grid-template-columns: 1fr auto; gap: 10px; padding: 10px 18px; }
-  .search-box { grid-column: 1 / -1; grid-row: 2; }
+  .topbar { height: 52px; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 8px 12px; }
+  .brand { gap: 6px; font-size: 15px; }
+  .brand-mark { width: 8px; height: 8px; }
+  .search-box { min-width: 0; height: 34px; padding: 0 9px; }
+  .search-box kbd { display: none; }
+  .top-new { width: 34px; min-height: 34px; padding: 0; border-radius: 50%; font-size: 16px; }
+  .top-new .button-label { display: none; }
   .workspace { display: block; padding-bottom: 58px; }
   .sidebar { position: fixed; z-index: 45; top: auto; right: 0; bottom: 0; left: 0; min-height: 0; height: 58px; flex-direction: row; overflow: visible; padding: 5px 8px max(5px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); border-right: 0; background: #ffffffed; backdrop-filter: blur(14px); }
   .sidebar .primary-nav { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: visible; }
@@ -308,7 +313,17 @@ button { cursor: pointer; }
   .diagnostic-error { grid-template-columns: 1fr; gap: 3px; }
   .settings-nav { flex: 0 0 56px; margin-top: 0; border-top: 0; border-left: 1px solid var(--line); border-radius: 0; }
   .storage-note { display: none; }
-  .main-content { padding: 24px 16px 52px; }
+  .main-content { padding: 16px 16px 52px; }
+  .view-heading { align-items: baseline; margin-bottom: 8px; }
+  .view-heading h1 { font-size: 21px; }
+  .view-heading p { margin: 0; font-size: 11px; }
+  .search-filter-rows { flex-wrap: nowrap; gap: 4px; margin: 0 -16px 12px; padding: 0 16px 3px; overflow-x: auto; scrollbar-width: none; }
+  .search-filter-rows::-webkit-scrollbar { display: none; }
+  .search-filters { flex: 0 0 auto; flex-wrap: nowrap; gap: 2px; }
+  .search-filters button { min-height: 26px; padding: 0 8px; white-space: nowrap; }
+  .time-filters { margin-left: 4px; padding-left: 8px; }
+  .capture-card { margin-bottom: 20px; padding: 13px 13px 10px; }
+  .capture-card textarea { min-height: 64px; }
   .capture-footer { align-items: flex-end; }
   .capture-actions .shortcut-hint { display: none; }
   .conflict-notice, .conflict-detail { align-items: flex-start; }
@@ -316,7 +331,7 @@ button { cursor: pointer; }
   .conflict-actions { justify-content: flex-start; }
   .conflict-compare { grid-template-columns: 1fr; }
   .note-detail-layout { grid-template-columns: 1fr; }
-  .note-toolbar { top: 102px; }
+  .note-toolbar { top: 52px; }
   .note-toolbar:not(.is-editing) { align-items: center; }
   .note-toolbar:not(.is-editing) .note-back { flex: 0 0 auto; }
   .note-toolbar:not(.is-editing) .note-toolbar-actions { min-width: 0; flex-wrap: nowrap; }
@@ -327,7 +342,7 @@ button { cursor: pointer; }
   .mobile-note-actions-menu[data-open="true"] { display: grid; }
   .note-toolbar .mobile-note-actions-menu .text-button { width: 100%; min-height: 38px; display: flex; order: initial; align-items: center; justify-content: flex-start; padding: 0 10px; font-size: 12px; }
   .note-toolbar-actions .text-button { padding: 0 6px; font-size: 11px; }
-  .editor-action-dock { top: 156px; gap: 8px; }
+  .editor-action-dock { top: 106px; gap: 8px; }
   .editor-tools { flex: 1 1 auto; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
   .editor-action-dock .button { min-height: 36px; padding: 0 9px; white-space: nowrap; }
   .edit-actions .shortcut-hint { display: none; }
