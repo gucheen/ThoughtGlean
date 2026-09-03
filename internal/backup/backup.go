@@ -158,7 +158,9 @@ func RestoreDrill(ctx context.Context, archivePath string) (Report, error) {
 		return Report{}, err
 	}
 	if !equalJSON(snapshot.Notes, verification.Notes) || !equalJSON(snapshot.Revisions, verification.Revisions) ||
-		!equalJSON(snapshot.Sources, verification.Sources) || !equalJSON(snapshot.Attachments, verification.Attachments) ||
+		!equalJSON(snapshot.Sources, verification.Sources) || !equalJSON(snapshot.MaterialLinks, verification.MaterialLinks) ||
+		!equalJSON(snapshot.Verifications, verification.Verifications) || !equalJSON(snapshot.Topics, verification.Topics) ||
+		!equalJSON(snapshot.TopicMemberships, verification.TopicMemberships) || !equalJSON(snapshot.Attachments, verification.Attachments) ||
 		!equalJSON(snapshot.Requests, verification.Requests) {
 		return Report{}, errors.New("restored data does not match backup")
 	}

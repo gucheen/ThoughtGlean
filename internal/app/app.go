@@ -132,22 +132,33 @@ func (a *App) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"generatedAt": backup.GeneratedAt,
-		"notes":       backup.Notes,
-		"sources":     backup.Sources,
-		"attachments": items,
+		"generatedAt":      backup.GeneratedAt,
+		"notes":            backup.Notes,
+		"sources":          backup.Sources,
+		"materialLinks":    backup.MaterialLinks,
+		"verifications":    backup.Verifications,
+		"topics":           backup.Topics,
+		"topicMemberships": backup.TopicMemberships,
+		"attachments":      items,
 	})
 }
 
 func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind                string           `json:"kind"`
-		Note                store.Note       `json:"note"`
-		NoteSyncID          string           `json:"noteSyncId"`
-		AttachmentSyncID    string           `json:"attachmentSyncId"`
-		AttachmentAltText   string           `json:"altText"`
-		ContinuedFromSyncID string           `json:"continuedFromSyncId"`
-		Source              store.NoteSource `json:"source"`
+		Kind                string                 `json:"kind"`
+		Note                store.Note             `json:"note"`
+		NoteSyncID          string                 `json:"noteSyncId"`
+		AttachmentSyncID    string                 `json:"attachmentSyncId"`
+		AttachmentAltText   string                 `json:"altText"`
+		ContinuedFromSyncID string                 `json:"continuedFromSyncId"`
+		DerivedFromSyncID   string                 `json:"derivedFromSyncId"`
+		MaterialSyncID      string                 `json:"materialSyncId"`
+		Source              store.NoteSource       `json:"source"`
+		MaterialLink        store.NoteMaterialLink `json:"materialLink"`
+		Verification        store.NoteVerification `json:"verification"`
+		Topic               store.Topic            `json:"topic"`
+		TopicMembership     store.TopicMembership  `json:"membership"`
+		TopicSyncID         string                 `json:"topicSyncId"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
@@ -160,6 +171,38 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := a.store.SetNoteSource(r.Context(), note.ID, body.Source); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if body.Kind == "material-link.upsert" {
+		if _, err := a.store.ApplyRemoteMaterialLink(r.Context(), body.MaterialLink, body.NoteSyncID, body.MaterialSyncID); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if body.Kind == "verification.upsert" {
+		if _, err := a.store.ApplyRemoteVerification(r.Context(), body.Verification, body.NoteSyncID); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if body.Kind == "topic.upsert" {
+		if _, err := a.store.ApplyRemoteTopic(r.Context(), body.Topic); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if body.Kind == "topic-membership.upsert" {
+		if _, err := a.store.ApplyRemoteTopicMembership(r.Context(), body.TopicMembership, body.TopicSyncID, body.NoteSyncID); err != nil {
 			writeAPIError(w, err)
 			return
 		}
@@ -207,7 +250,7 @@ func (a *App) applyLocalSyncEvent(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "unsupported sync event"})
 		return
 	}
-	note, err := a.store.ApplyRemoteNoteWithParent(r.Context(), body.Note, body.ContinuedFromSyncID)
+	note, err := a.store.ApplyRemoteNoteWithRelations(r.Context(), body.Note, body.ContinuedFromSyncID, body.DerivedFromSyncID)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -794,8 +837,10 @@ func (a *App) createNote(w http.ResponseWriter, r *http.Request) {
 		RequestID       string  `json:"requestId"`
 		Title           string  `json:"title"`
 		Content         string  `json:"content"`
+		Kind            string  `json:"kind"`
 		Starred         bool    `json:"starred"`
 		ContinuedFromID *string `json:"continuedFromId"`
+		DerivedFromID   *string `json:"derivedFromId"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
@@ -806,8 +851,8 @@ func (a *App) createNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note, duplicate, err := a.store.CreateNote(r.Context(), store.CreateNoteInput{
-		RequestID: body.RequestID, Title: body.Title, Content: body.Content,
-		Starred: body.Starred, ContinuedFromID: body.ContinuedFromID,
+		RequestID: body.RequestID, Title: body.Title, Content: body.Content, Kind: body.Kind,
+		Starred: body.Starred, ContinuedFromID: body.ContinuedFromID, DerivedFromID: body.DerivedFromID,
 	})
 	if err != nil {
 		var conflict *store.IdempotencyConflictError
@@ -848,6 +893,7 @@ func (a *App) updateNote(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Title            *string `json:"title"`
 		Content          *string `json:"content"`
+		Kind             *string `json:"kind"`
 		Starred          *bool   `json:"starred"`
 		ExpectedRevision int     `json:"expectedRevision"`
 	}
@@ -855,7 +901,7 @@ func (a *App) updateNote(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if body.Title == nil && body.Content == nil && body.Starred == nil {
+	if body.Title == nil && body.Content == nil && body.Kind == nil && body.Starred == nil {
 		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "no changes supplied"})
 		return
 	}
@@ -864,7 +910,7 @@ func (a *App) updateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note, err := a.store.UpdateNote(r.Context(), id, store.UpdateNoteInput{
-		Title: body.Title, Content: body.Content, Starred: body.Starred, ExpectedRevision: body.ExpectedRevision,
+		Title: body.Title, Content: body.Content, Kind: body.Kind, Starred: body.Starred, ExpectedRevision: body.ExpectedRevision,
 	})
 	if err != nil {
 		var conflict *store.ConflictError

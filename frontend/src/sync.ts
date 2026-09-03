@@ -1,7 +1,7 @@
-import { db, newID, type Attachment, type Note, type NoteSource, type SyncPayload, upsertIncoming } from "./db";
+import { db, newID, type Attachment, type Note, type NoteMaterialLink, type NoteSource, type NoteVerification, type SyncPayload, type Topic, type TopicMembership, upsertIncoming } from "./db";
 
 type ServerAttachment = Omit<Attachment, "blob"> & { contentHash?: string };
-type Snapshot = { generatedAt: string; notes: Note[]; sources: NoteSource[]; attachments: ServerAttachment[] };
+type Snapshot = { generatedAt: string; notes: Note[]; sources: NoteSource[]; materialLinks?: NoteMaterialLink[]; verifications?: NoteVerification[]; topics?: Topic[]; topicMemberships?: TopicMembership[]; attachments: ServerAttachment[] };
 
 export type AuthStatus = { enabled: boolean; configured: boolean; authenticated: boolean; tokenLoginEnabled: boolean };
 export type PasskeyInfo = { id: string; createdAt: string; updatedAt: string };
@@ -142,6 +142,10 @@ export class ServerSync {
 
   private async runSync() {
     const events = await db.events.orderBy("createdAt").toArray();
+    events.sort((left, right) => {
+      const priority = (event: typeof left) => event.payload.kind === "topic.upsert" ? 0 : event.payload.kind === "note.upsert" ? event.payload.note.kind === "material" ? 1 : 2 : event.payload.kind === "material-link.upsert" ? 3 : event.payload.kind === "verification.upsert" ? 4 : event.payload.kind === "topic-membership.upsert" ? 5 : 6;
+      return priority(left) - priority(right) || left.createdAt.localeCompare(right.createdAt);
+    });
     for (const event of events) {
       await this.push(event.payload);
       await db.events.delete(event.id);
@@ -152,10 +156,26 @@ export class ServerSync {
     const pendingEvents = await db.events.toArray();
     const pendingNoteSyncIDs = new Set(pendingEvents.flatMap(event => event.payload.kind === "note.upsert" ? [event.payload.note.syncId] : []));
     const pendingAttachmentUpdateIDs = new Set(pendingEvents.flatMap(event => event.payload.kind === "attachment.update" ? [event.payload.attachmentSyncId] : []));
-    const notes = [...snapshot.notes].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const notes = [...snapshot.notes].sort((left, right) => {
+      if (left.kind === "material" && right.kind !== "material") return -1;
+      if (right.kind === "material" && left.kind !== "material") return 1;
+      return left.createdAt.localeCompare(right.createdAt);
+    });
     for (const note of notes) {
       const parent = note.continuedFromId ? snapshot.notes.find(item => item.id === note.continuedFromId) : undefined;
-      await upsertIncoming({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId }, undefined, !pendingNoteSyncIDs.has(note.syncId));
+      const sourceMaterial = note.derivedFromId ? snapshot.notes.find(item => item.id === note.derivedFromId) : undefined;
+      await upsertIncoming({ kind: "note.upsert", note, continuedFromSyncId: parent?.syncId, derivedFromSyncId: sourceMaterial?.syncId }, undefined, !pendingNoteSyncIDs.has(note.syncId));
+    }
+
+    if (Array.isArray(snapshot.topics)) {
+      const serverTopicSyncIDs = new Set(snapshot.topics.map(topic => topic.syncId));
+      for (const topic of snapshot.topics) await upsertIncoming({ kind: "topic.upsert", topic });
+      for (const localTopic of await db.topics.toArray()) {
+        if (!serverTopicSyncIDs.has(localTopic.syncId)) {
+          await db.topicMemberships.where("topicId").equals(localTopic.id).delete();
+          await db.topics.delete(localTopic.id);
+        }
+      }
     }
 
     const noteByServerID = new Map(snapshot.notes.map(note => [note.id, note]));
@@ -166,6 +186,40 @@ export class ServerSync {
       if (note) {
         serverSourceNoteSyncIDs.add(note.syncId);
         await upsertIncoming({ kind: "source.upsert", noteSyncId: note.syncId, source });
+      }
+    }
+    if (Array.isArray(snapshot.materialLinks)) {
+      const serverMaterialLinkSyncIDs = new Set(snapshot.materialLinks.map(link => link.syncId));
+      for (const link of snapshot.materialLinks) {
+        const note = noteByServerID.get(link.noteId); const material = noteByServerID.get(link.materialId);
+        if (note && material) await upsertIncoming({ kind: "material-link.upsert", noteSyncId: note.syncId, materialSyncId: material.syncId, materialLink: link });
+      }
+      for (const localLink of await db.materialLinks.toArray()) {
+        const localNote = await db.notes.get(localLink.noteId);
+        if (localNote && serverNoteSyncIDs.has(localNote.syncId) && !serverMaterialLinkSyncIDs.has(localLink.syncId)) await db.materialLinks.delete(localLink.id);
+      }
+    }
+    if (Array.isArray(snapshot.verifications)) {
+      const serverVerificationSyncIDs = new Set(snapshot.verifications.map(item => item.syncId));
+      for (const verification of snapshot.verifications) {
+        const note = noteByServerID.get(verification.noteId);
+        if (note) await upsertIncoming({ kind: "verification.upsert", noteSyncId: note.syncId, verification });
+      }
+      for (const localVerification of await db.verifications.toArray()) {
+        const localNote = await db.notes.get(localVerification.noteId);
+        if (localNote && serverNoteSyncIDs.has(localNote.syncId) && !serverVerificationSyncIDs.has(localVerification.syncId)) await db.verifications.delete(localVerification.id);
+      }
+    }
+    if (Array.isArray(snapshot.topicMemberships)) {
+      const serverMembershipSyncIDs = new Set(snapshot.topicMemberships.map(item => item.syncId));
+      for (const membership of snapshot.topicMemberships) {
+        const topic = snapshot.topics?.find(item => item.id === membership.topicId);
+        const note = noteByServerID.get(membership.noteId);
+        if (topic && note) await upsertIncoming({ kind: "topic-membership.upsert", topicSyncId: topic.syncId, noteSyncId: note.syncId, membership });
+      }
+      for (const localMembership of await db.topicMemberships.toArray()) {
+        const localTopic = await db.topics.get(localMembership.topicId); const localNote = await db.notes.get(localMembership.noteId);
+        if (localTopic && localNote && serverNoteSyncIDs.has(localNote.syncId) && snapshot.topics?.some(topic => topic.syncId === localTopic.syncId) && !serverMembershipSyncIDs.has(localMembership.syncId)) await db.topicMemberships.delete(localMembership.id);
       }
     }
     for (const localSource of await db.sources.toArray()) {

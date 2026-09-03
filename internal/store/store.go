@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -56,8 +57,10 @@ type Note struct {
 	SyncID          string  `json:"syncId"`
 	Title           string  `json:"title"`
 	Content         string  `json:"content"`
+	Kind            string  `json:"kind"`
 	Starred         bool    `json:"starred"`
 	ContinuedFromID *string `json:"continuedFromId,omitempty"`
+	DerivedFromID   *string `json:"derivedFromId,omitempty"`
 	Revision        int     `json:"revision"`
 	CreatedAt       string  `json:"createdAt"`
 	UpdatedAt       string  `json:"updatedAt"`
@@ -68,13 +71,16 @@ type CreateNoteInput struct {
 	RequestID       string
 	Title           string
 	Content         string
+	Kind            string
 	Starred         bool
 	ContinuedFromID *string
+	DerivedFromID   *string
 }
 
 type UpdateNoteInput struct {
 	Title            *string
 	Content          *string
+	Kind             *string
 	Starred          *bool
 	ExpectedRevision int
 }
@@ -98,6 +104,45 @@ type NoteSource struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+type NoteMaterialLink struct {
+	ID         string `json:"id"`
+	SyncID     string `json:"syncId"`
+	NoteID     string `json:"noteId"`
+	MaterialID string `json:"materialId"`
+	CreatedAt  string `json:"createdAt"`
+}
+
+type NoteVerification struct {
+	ID           string `json:"id"`
+	SyncID       string `json:"syncId"`
+	NoteID       string `json:"noteId"`
+	NoteRevision int    `json:"noteRevision"`
+	VerifiedAt   string `json:"verifiedAt"`
+	Environment  string `json:"environment"`
+	Result       string `json:"result"`
+	Comment      string `json:"comment"`
+}
+
+type Topic struct {
+	ID        string  `json:"id"`
+	SyncID    string  `json:"syncId"`
+	Name      string  `json:"name"`
+	CreatedAt string  `json:"createdAt"`
+	UpdatedAt string  `json:"updatedAt"`
+	DeletedAt *string `json:"deletedAt,omitempty"`
+}
+
+type TopicMembership struct {
+	ID        string  `json:"id"`
+	SyncID    string  `json:"syncId"`
+	TopicID   string  `json:"topicId"`
+	NoteID    string  `json:"noteId"`
+	Pinned    bool    `json:"pinned"`
+	CreatedAt string  `json:"createdAt"`
+	UpdatedAt string  `json:"updatedAt"`
+	DeletedAt *string `json:"deletedAt,omitempty"`
+}
+
 type Attachment struct {
 	ID           string `json:"id"`
 	SyncID       string `json:"syncId"`
@@ -114,15 +159,19 @@ type Attachment struct {
 // Search text and request hashes are deliberately omitted: both are derived
 // implementation details and can be recreated from the records below.
 type Backup struct {
-	Format      string          `json:"format"`
-	Version     int             `json:"version"`
-	GeneratedAt string          `json:"generatedAt"`
-	Notes       []Note          `json:"notes"`
-	Revisions   []NoteRevision  `json:"revisions"`
-	Sources     []NoteSource    `json:"sources,omitempty"`
-	Attachments []Attachment    `json:"attachments,omitempty"`
-	Requests    []BackupRequest `json:"requests"`
-	Integrity   BackupIntegrity `json:"integrity"`
+	Format           string             `json:"format"`
+	Version          int                `json:"version"`
+	GeneratedAt      string             `json:"generatedAt"`
+	Notes            []Note             `json:"notes"`
+	Revisions        []NoteRevision     `json:"revisions"`
+	Sources          []NoteSource       `json:"sources,omitempty"`
+	MaterialLinks    []NoteMaterialLink `json:"materialLinks,omitempty"`
+	Verifications    []NoteVerification `json:"verifications,omitempty"`
+	Topics           []Topic            `json:"topics,omitempty"`
+	TopicMemberships []TopicMembership  `json:"topicMemberships,omitempty"`
+	Attachments      []Attachment       `json:"attachments,omitempty"`
+	Requests         []BackupRequest    `json:"requests"`
+	Integrity        BackupIntegrity    `json:"integrity"`
 }
 
 // BackupRequest preserves create idempotency across a restore.
@@ -138,8 +187,10 @@ type NoteRevision struct {
 	Title           string  `json:"title"`
 	Content         string  `json:"content"`
 	ContentHash     string  `json:"contentHash"`
+	Kind            string  `json:"kind"`
 	Starred         bool    `json:"starred"`
 	ContinuedFromID *string `json:"continuedFromId,omitempty"`
+	DerivedFromID   *string `json:"derivedFromId,omitempty"`
 	DeletedAt       *string `json:"deletedAt,omitempty"`
 	CreatedAt       string  `json:"createdAt"`
 }
@@ -440,6 +491,13 @@ func (s *Store) CreateNote(ctx context.Context, in CreateNoteInput) (Note, bool,
 	if len(in.Content) > 1<<20 {
 		return Note{}, false, invalidInput("content exceeds 1 MiB")
 	}
+	in.Kind = normalizedNoteKind(in.Kind)
+	if !validNoteKind(in.Kind) {
+		return Note{}, false, invalidInput("unknown note kind")
+	}
+	if in.DerivedFromID != nil && in.Kind != "procedure" {
+		return Note{}, false, invalidInput("only procedure notes can reference source material")
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -470,6 +528,18 @@ func (s *Store) CreateNote(ctx context.Context, in CreateNoteInput) (Note, bool,
 			return Note{}, false, err
 		}
 	}
+	if in.DerivedFromID != nil {
+		var kind string
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM notes WHERE id = ? AND deleted_at IS NULL`, *in.DerivedFromID).Scan(&kind); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Note{}, false, invalidInput("source material does not exist")
+			}
+			return Note{}, false, err
+		}
+		if kind != "material" {
+			return Note{}, false, invalidInput("derived note must reference source material")
+		}
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var request any
@@ -485,9 +555,9 @@ func (s *Store) CreateNote(ctx context.Context, in CreateNoteInput) (Note, bool,
 		return Note{}, false, err
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO notes (id, sync_id, request_id, request_hash, title, content, search_text, starred, continued_from_id, revision, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-		id, syncID, request, requestHash, in.Title, in.Content, normalizeSearch(in.Title+"\n"+in.Content), in.Starred, in.ContinuedFromID, now, now)
+		INSERT INTO notes (id, sync_id, request_id, request_hash, title, content, search_text, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		id, syncID, request, requestHash, in.Title, in.Content, normalizeSearch(in.Title+"\n"+in.Content), in.Kind, in.Starred, in.ContinuedFromID, in.DerivedFromID, now, now)
 	if err != nil {
 		if requestID != "" && strings.Contains(strings.ToLower(err.Error()), "unique") {
 			note, existingHash, getErr := getNoteByRequestID(ctx, tx, requestID)
@@ -501,7 +571,7 @@ func (s *Store) CreateNote(ctx context.Context, in CreateNoteInput) (Note, bool,
 		}
 		return Note{}, false, err
 	}
-	note := Note{ID: id, SyncID: syncID, Title: in.Title, Content: in.Content, Starred: in.Starred, ContinuedFromID: in.ContinuedFromID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	note := Note{ID: id, SyncID: syncID, Title: in.Title, Content: in.Content, Kind: in.Kind, Starred: in.Starred, ContinuedFromID: in.ContinuedFromID, DerivedFromID: in.DerivedFromID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := insertRevision(ctx, tx, note); err != nil {
 		return Note{}, false, err
 	}
@@ -516,7 +586,7 @@ func (s *Store) GetNote(ctx context.Context, id string) (Note, error) {
 }
 
 func (s *Store) GetNoteBySyncID(ctx context.Context, syncID string) (Note, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at FROM notes WHERE sync_id = ?`, syncID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at FROM notes WHERE sync_id = ?`, syncID)
 	note, err := scanNote(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Note{}, ErrNotFound
@@ -535,6 +605,237 @@ func (s *Store) GetNoteSource(ctx context.Context, noteID string) (NoteSource, e
 
 func (s *Store) ListNoteSources(ctx context.Context) ([]NoteSource, error) {
 	return allSources(ctx, s.db)
+}
+
+func (s *Store) ListMaterialLinks(ctx context.Context) ([]NoteMaterialLink, error) {
+	return allMaterialLinks(ctx, s.db)
+}
+
+func (s *Store) ListVerifications(ctx context.Context) ([]NoteVerification, error) {
+	return allVerifications(ctx, s.db)
+}
+
+func (s *Store) ListTopics(ctx context.Context) ([]Topic, error) {
+	return allTopics(ctx, s.db)
+}
+
+func (s *Store) ListTopicMemberships(ctx context.Context) ([]TopicMembership, error) {
+	return allTopicMemberships(ctx, s.db)
+}
+
+func (s *Store) ApplyRemoteTopic(ctx context.Context, incoming Topic) (Topic, error) {
+	incoming.Name = strings.TrimSpace(incoming.Name)
+	if !validSyncID(incoming.SyncID) || incoming.Name == "" || len(incoming.Name) > 80 {
+		return Topic{}, invalidInput("invalid topic")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, incoming.CreatedAt); err != nil {
+		return Topic{}, invalidInput("invalid topic creation time")
+	}
+	incomingUpdated, err := time.Parse(time.RFC3339Nano, incoming.UpdatedAt)
+	if err != nil {
+		return Topic{}, invalidInput("invalid topic update time")
+	}
+	if incoming.DeletedAt != nil {
+		if _, err := time.Parse(time.RFC3339Nano, *incoming.DeletedAt); err != nil {
+			return Topic{}, invalidInput("invalid topic deletion time")
+		}
+	}
+	var existing Topic
+	err = s.db.QueryRowContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at FROM topics WHERE sync_id = ?`, incoming.SyncID).
+		Scan(&existing.ID, &existing.SyncID, &existing.Name, &existing.CreatedAt, &existing.UpdatedAt, &existing.DeletedAt)
+	if err == nil {
+		existingUpdated, parseErr := time.Parse(time.RFC3339Nano, existing.UpdatedAt)
+		if parseErr == nil && incomingUpdated.Before(existingUpdated) {
+			return existing, nil
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE topics SET name = ?, updated_at = ?, deleted_at = ? WHERE id = ?`, incoming.Name, incoming.UpdatedAt, incoming.DeletedAt, existing.ID)
+		incoming.ID = existing.ID
+		return incoming, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Topic{}, err
+	}
+	incoming.ID, err = newSyncID()
+	if err != nil {
+		return Topic{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`, incoming.ID, incoming.SyncID, incoming.Name, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt)
+	return incoming, err
+}
+
+func (s *Store) ApplyRemoteTopicMembership(ctx context.Context, incoming TopicMembership, topicSyncID, noteSyncID string) (TopicMembership, error) {
+	if !validSyncID(incoming.SyncID) || !validSyncID(topicSyncID) || !validSyncID(noteSyncID) {
+		return TopicMembership{}, invalidInput("invalid topic membership")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, incoming.CreatedAt); err != nil {
+		return TopicMembership{}, invalidInput("invalid topic membership creation time")
+	}
+	incomingUpdated, err := time.Parse(time.RFC3339Nano, incoming.UpdatedAt)
+	if err != nil {
+		return TopicMembership{}, invalidInput("invalid topic membership update time")
+	}
+	if incoming.DeletedAt != nil {
+		if _, err := time.Parse(time.RFC3339Nano, *incoming.DeletedAt); err != nil {
+			return TopicMembership{}, invalidInput("invalid topic membership deletion time")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TopicMembership{}, err
+	}
+	defer tx.Rollback()
+	var topicID, noteID, noteKind string
+	var topicDeletedAt, noteDeletedAt *string
+	if err := tx.QueryRowContext(ctx, `SELECT id, deleted_at FROM topics WHERE sync_id = ?`, topicSyncID).Scan(&topicID, &topicDeletedAt); err != nil {
+		return TopicMembership{}, invalidInput("topic does not exist")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT id, kind, deleted_at FROM notes WHERE sync_id = ?`, noteSyncID).Scan(&noteID, &noteKind, &noteDeletedAt); err != nil {
+		return TopicMembership{}, invalidInput("topic record does not exist")
+	}
+	if incoming.DeletedAt == nil && (topicDeletedAt != nil || noteDeletedAt != nil) {
+		return TopicMembership{}, invalidInput("topic or record is deleted")
+	}
+	if incoming.DeletedAt == nil && incoming.Pinned && noteKind != "procedure" {
+		return TopicMembership{}, invalidInput("only procedure notes can be pinned in a topic")
+	}
+	var existing TopicMembership
+	err = tx.QueryRowContext(ctx, `SELECT id, sync_id, topic_id, note_id, pinned, created_at, updated_at, deleted_at FROM topic_memberships WHERE sync_id = ? OR (topic_id = ? AND note_id = ?) ORDER BY CASE WHEN sync_id = ? THEN 0 ELSE 1 END LIMIT 1`, incoming.SyncID, topicID, noteID, incoming.SyncID).
+		Scan(&existing.ID, &existing.SyncID, &existing.TopicID, &existing.NoteID, &existing.Pinned, &existing.CreatedAt, &existing.UpdatedAt, &existing.DeletedAt)
+	if err == nil {
+		if existing.TopicID != topicID || existing.NoteID != noteID {
+			return TopicMembership{}, invalidInput("topic membership sync id is already in use")
+		}
+		existingUpdated, parseErr := time.Parse(time.RFC3339Nano, existing.UpdatedAt)
+		if parseErr == nil && incomingUpdated.Before(existingUpdated) {
+			return existing, tx.Commit()
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE topic_memberships SET pinned = ?, updated_at = ?, deleted_at = ? WHERE id = ?`, incoming.Pinned, incoming.UpdatedAt, incoming.DeletedAt, existing.ID); err != nil {
+			return TopicMembership{}, err
+		}
+		incoming.ID, incoming.SyncID, incoming.TopicID, incoming.NoteID = existing.ID, existing.SyncID, topicID, noteID
+		return incoming, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return TopicMembership{}, err
+	}
+	incoming.ID, err = newSyncID()
+	if err != nil {
+		return TopicMembership{}, err
+	}
+	incoming.TopicID, incoming.NoteID = topicID, noteID
+	if _, err := tx.ExecContext(ctx, `INSERT INTO topic_memberships (id, sync_id, topic_id, note_id, pinned, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, incoming.ID, incoming.SyncID, topicID, noteID, incoming.Pinned, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt); err != nil {
+		return TopicMembership{}, err
+	}
+	return incoming, tx.Commit()
+}
+
+func (s *Store) ApplyRemoteMaterialLink(ctx context.Context, link NoteMaterialLink, noteSyncID, materialSyncID string) (NoteMaterialLink, error) {
+	if !validSyncID(link.SyncID) || !validSyncID(noteSyncID) || !validSyncID(materialSyncID) || noteSyncID == materialSyncID {
+		return NoteMaterialLink{}, invalidInput("invalid material link")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return NoteMaterialLink{}, err
+	}
+	defer tx.Rollback()
+	var noteID, noteKind, materialID, materialKind string
+	if err := tx.QueryRowContext(ctx, `SELECT id, kind FROM notes WHERE sync_id = ?`, noteSyncID).Scan(&noteID, &noteKind); err != nil {
+		return NoteMaterialLink{}, invalidInput("linked procedure does not exist")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT id, kind FROM notes WHERE sync_id = ?`, materialSyncID).Scan(&materialID, &materialKind); err != nil {
+		return NoteMaterialLink{}, invalidInput("linked source material does not exist")
+	}
+	if noteKind != "procedure" || materialKind != "material" {
+		return NoteMaterialLink{}, invalidInput("material links require a procedure and source material")
+	}
+	if link.CreatedAt == "" {
+		link.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	} else if _, err := time.Parse(time.RFC3339Nano, link.CreatedAt); err != nil {
+		return NoteMaterialLink{}, invalidInput("invalid material link time")
+	}
+	var existing NoteMaterialLink
+	err = tx.QueryRowContext(ctx, `SELECT id, sync_id, note_id, material_id, created_at FROM note_material_links WHERE sync_id = ?`, link.SyncID).
+		Scan(&existing.ID, &existing.SyncID, &existing.NoteID, &existing.MaterialID, &existing.CreatedAt)
+	if err == nil {
+		if existing.NoteID != noteID || existing.MaterialID != materialID {
+			return NoteMaterialLink{}, invalidInput("material link sync id is already in use")
+		}
+		return existing, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return NoteMaterialLink{}, err
+	}
+	err = tx.QueryRowContext(ctx, `SELECT id, sync_id, note_id, material_id, created_at FROM note_material_links WHERE note_id = ? AND material_id = ?`, noteID, materialID).
+		Scan(&existing.ID, &existing.SyncID, &existing.NoteID, &existing.MaterialID, &existing.CreatedAt)
+	if err == nil {
+		return existing, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return NoteMaterialLink{}, err
+	}
+	link.ID, err = newSyncID()
+	if err != nil {
+		return NoteMaterialLink{}, err
+	}
+	link.NoteID, link.MaterialID = noteID, materialID
+	if _, err := tx.ExecContext(ctx, `INSERT INTO note_material_links (id, sync_id, note_id, material_id, created_at) VALUES (?, ?, ?, ?, ?)`, link.ID, link.SyncID, noteID, materialID, link.CreatedAt); err != nil {
+		return NoteMaterialLink{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return NoteMaterialLink{}, err
+	}
+	return link, nil
+}
+
+func (s *Store) ApplyRemoteVerification(ctx context.Context, verification NoteVerification, noteSyncID string) (NoteVerification, error) {
+	if !validSyncID(verification.SyncID) || !validSyncID(noteSyncID) || !validVerificationResult(verification.Result) {
+		return NoteVerification{}, invalidInput("invalid verification")
+	}
+	verification.Environment = strings.TrimSpace(verification.Environment)
+	verification.Comment = strings.TrimSpace(verification.Comment)
+	if verification.Environment == "" || len(verification.Environment) > 500 || len(verification.Comment) > 4000 {
+		return NoteVerification{}, invalidInput("invalid verification details")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, verification.VerifiedAt); err != nil {
+		return NoteVerification{}, invalidInput("invalid verification time")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return NoteVerification{}, err
+	}
+	defer tx.Rollback()
+	var noteID, kind string
+	var revision int
+	if err := tx.QueryRowContext(ctx, `SELECT id, kind, revision FROM notes WHERE sync_id = ?`, noteSyncID).Scan(&noteID, &kind, &revision); err != nil {
+		return NoteVerification{}, invalidInput("verified note does not exist")
+	}
+	if kind != "procedure" || verification.NoteRevision <= 0 || verification.NoteRevision > revision {
+		return NoteVerification{}, invalidInput("verification must reference an existing procedure revision")
+	}
+	var existing NoteVerification
+	err = tx.QueryRowContext(ctx, `SELECT id, sync_id, note_id, note_revision, verified_at, environment, result, comment FROM note_verifications WHERE sync_id = ?`, verification.SyncID).
+		Scan(&existing.ID, &existing.SyncID, &existing.NoteID, &existing.NoteRevision, &existing.VerifiedAt, &existing.Environment, &existing.Result, &existing.Comment)
+	if err == nil {
+		if existing.NoteID != noteID {
+			return NoteVerification{}, invalidInput("verification sync id is already in use")
+		}
+		return existing, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return NoteVerification{}, err
+	}
+	verification.ID, err = newSyncID()
+	if err != nil {
+		return NoteVerification{}, err
+	}
+	verification.NoteID = noteID
+	if _, err := tx.ExecContext(ctx, `INSERT INTO note_verifications (id, sync_id, note_id, note_revision, verified_at, environment, result, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, verification.ID, verification.SyncID, noteID, verification.NoteRevision, verification.VerifiedAt, verification.Environment, verification.Result, verification.Comment); err != nil {
+		return NoteVerification{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return NoteVerification{}, err
+	}
+	return verification, nil
 }
 
 func (s *Store) SetNoteSource(ctx context.Context, noteID string, source NoteSource) (NoteSource, error) {
@@ -736,7 +1037,7 @@ func (s *Store) ListNotes(ctx context.Context, opts ListOptions) ([]Note, error)
 		}
 	}
 	args = append(args, limit)
-	query := `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at
+	query := `SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at
 		FROM notes WHERE ` + strings.Join(where, " AND ") + ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -794,6 +1095,22 @@ func (s *Store) backupData(ctx context.Context, includeAttachments bool) (Backup
 		return Backup{}, err
 	}
 	backup.Sources, err = allSources(ctx, tx)
+	if err != nil {
+		return Backup{}, err
+	}
+	backup.MaterialLinks, err = allMaterialLinks(ctx, tx)
+	if err != nil {
+		return Backup{}, err
+	}
+	backup.Verifications, err = allVerifications(ctx, tx)
+	if err != nil {
+		return Backup{}, err
+	}
+	backup.Topics, err = allTopics(ctx, tx)
+	if err != nil {
+		return Backup{}, err
+	}
+	backup.TopicMemberships, err = allTopicMemberships(ctx, tx)
 	if err != nil {
 		return Backup{}, err
 	}
@@ -855,7 +1172,7 @@ func validateBackupStructure(backup Backup) error {
 	}
 	notes := make(map[string]Note, len(backup.Notes))
 	for _, note := range backup.Notes {
-		if note.ID == "" || note.Revision <= 0 || strings.TrimSpace(note.Content) == "" {
+		if note.ID == "" || note.Revision <= 0 || strings.TrimSpace(note.Content) == "" || !validNoteKind(normalizedNoteKind(note.Kind)) {
 			return fmt.Errorf("backup has an invalid note %s", note.ID)
 		}
 		if _, exists := notes[note.ID]; exists {
@@ -887,6 +1204,18 @@ func validateBackupStructure(backup Backup) error {
 				return fmt.Errorf("note %s references a missing continued note", id)
 			}
 		}
+		if note.DerivedFromID != nil {
+			if normalizedNoteKind(note.Kind) != "procedure" {
+				return fmt.Errorf("note %s is not a procedure but references source material", id)
+			}
+			if *note.DerivedFromID == id {
+				return fmt.Errorf("note %s cannot derive from itself", id)
+			}
+			source, exists := notes[*note.DerivedFromID]
+			if !exists || normalizedNoteKind(source.Kind) != "material" {
+				return fmt.Errorf("note %s references invalid source material", id)
+			}
+		}
 		byNumber := revisions[id]
 		if len(byNumber) != note.Revision {
 			return fmt.Errorf("note %s has incomplete revision history", id)
@@ -897,10 +1226,97 @@ func validateBackupStructure(backup Backup) error {
 			}
 		}
 		latest := byNumber[note.Revision]
-		if latest.Title != note.Title || latest.Content != note.Content || latest.Starred != note.Starred ||
-			!sameStringPointer(latest.ContinuedFromID, note.ContinuedFromID) || !sameStringPointer(latest.DeletedAt, note.DeletedAt) || latest.CreatedAt != note.UpdatedAt {
+		if latest.Title != note.Title || latest.Content != note.Content || normalizedNoteKind(latest.Kind) != normalizedNoteKind(note.Kind) || latest.Starred != note.Starred ||
+			!sameStringPointer(latest.ContinuedFromID, note.ContinuedFromID) || !sameStringPointer(latest.DerivedFromID, note.DerivedFromID) || !sameStringPointer(latest.DeletedAt, note.DeletedAt) || latest.CreatedAt != note.UpdatedAt {
 			return fmt.Errorf("note %s does not match its latest revision", id)
 		}
+	}
+	linkIDs := make(map[string]struct{}, len(backup.MaterialLinks))
+	linkPairs := make(map[string]struct{}, len(backup.MaterialLinks))
+	for _, link := range backup.MaterialLinks {
+		note, noteExists := notes[link.NoteID]
+		material, materialExists := notes[link.MaterialID]
+		pair := link.NoteID + "\x00" + link.MaterialID
+		if link.ID == "" || link.SyncID == "" || !noteExists || !materialExists || normalizedNoteKind(note.Kind) != "procedure" || normalizedNoteKind(material.Kind) != "material" || link.NoteID == link.MaterialID {
+			return fmt.Errorf("backup has an invalid material link %s", link.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, link.CreatedAt); err != nil {
+			return fmt.Errorf("backup has an invalid material link time %s", link.ID)
+		}
+		if _, exists := linkIDs[link.SyncID]; exists {
+			return fmt.Errorf("backup has duplicate material link sync id %s", link.SyncID)
+		}
+		if _, exists := linkPairs[pair]; exists {
+			return fmt.Errorf("backup has duplicate material link for note %s", link.NoteID)
+		}
+		linkIDs[link.SyncID], linkPairs[pair] = struct{}{}, struct{}{}
+	}
+	verificationIDs := make(map[string]struct{}, len(backup.Verifications))
+	for _, verification := range backup.Verifications {
+		note, exists := notes[verification.NoteID]
+		if verification.ID == "" || verification.SyncID == "" || !exists || normalizedNoteKind(note.Kind) != "procedure" || verification.NoteRevision <= 0 || verification.NoteRevision > note.Revision || !validVerificationResult(verification.Result) || strings.TrimSpace(verification.Environment) == "" || len(verification.Environment) > 500 || len(verification.Comment) > 4000 {
+			return fmt.Errorf("backup has an invalid verification %s", verification.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, verification.VerifiedAt); err != nil {
+			return fmt.Errorf("backup has an invalid verification time %s", verification.ID)
+		}
+		if _, exists := verificationIDs[verification.SyncID]; exists {
+			return fmt.Errorf("backup has duplicate verification sync id %s", verification.SyncID)
+		}
+		verificationIDs[verification.SyncID] = struct{}{}
+	}
+	topics := make(map[string]Topic, len(backup.Topics))
+	topicSyncIDs := make(map[string]struct{}, len(backup.Topics))
+	for _, topic := range backup.Topics {
+		if topic.ID == "" || topic.SyncID == "" || strings.TrimSpace(topic.Name) == "" || len(topic.Name) > 80 {
+			return fmt.Errorf("backup has an invalid topic %s", topic.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, topic.CreatedAt); err != nil {
+			return fmt.Errorf("backup has an invalid topic creation time %s", topic.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, topic.UpdatedAt); err != nil {
+			return fmt.Errorf("backup has an invalid topic update time %s", topic.ID)
+		}
+		if topic.DeletedAt != nil {
+			if _, err := time.Parse(time.RFC3339Nano, *topic.DeletedAt); err != nil {
+				return fmt.Errorf("backup has an invalid topic deletion time %s", topic.ID)
+			}
+		}
+		if _, exists := topics[topic.ID]; exists {
+			return fmt.Errorf("backup has duplicate topic id %s", topic.ID)
+		}
+		if _, exists := topicSyncIDs[topic.SyncID]; exists {
+			return fmt.Errorf("backup has duplicate topic sync id %s", topic.SyncID)
+		}
+		topics[topic.ID], topicSyncIDs[topic.SyncID] = topic, struct{}{}
+	}
+	membershipSyncIDs := make(map[string]struct{}, len(backup.TopicMemberships))
+	membershipPairs := make(map[string]struct{}, len(backup.TopicMemberships))
+	for _, membership := range backup.TopicMemberships {
+		note, noteExists := notes[membership.NoteID]
+		_, topicExists := topics[membership.TopicID]
+		pair := membership.TopicID + "\x00" + membership.NoteID
+		if membership.ID == "" || membership.SyncID == "" || !topicExists || !noteExists || (membership.DeletedAt == nil && membership.Pinned && normalizedNoteKind(note.Kind) != "procedure") {
+			return fmt.Errorf("backup has an invalid topic membership %s", membership.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, membership.CreatedAt); err != nil {
+			return fmt.Errorf("backup has an invalid topic membership creation time %s", membership.ID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, membership.UpdatedAt); err != nil {
+			return fmt.Errorf("backup has an invalid topic membership update time %s", membership.ID)
+		}
+		if membership.DeletedAt != nil {
+			if _, err := time.Parse(time.RFC3339Nano, *membership.DeletedAt); err != nil {
+				return fmt.Errorf("backup has an invalid topic membership deletion time %s", membership.ID)
+			}
+		}
+		if _, exists := membershipSyncIDs[membership.SyncID]; exists {
+			return fmt.Errorf("backup has duplicate topic membership sync id %s", membership.SyncID)
+		}
+		if _, exists := membershipPairs[pair]; exists {
+			return fmt.Errorf("backup has duplicate topic membership for topic %s", membership.TopicID)
+		}
+		membershipSyncIDs[membership.SyncID], membershipPairs[pair] = struct{}{}, struct{}{}
 	}
 	requestIDs := make(map[string]string, len(backup.Requests))
 	for _, request := range backup.Requests {
@@ -940,6 +1356,9 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM notes`); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM topics`); err != nil {
+		return err
+	}
 	for _, note := range backup.Notes {
 		request := requests[note.ID]
 		var requestID, requestHash any
@@ -952,9 +1371,10 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO notes (id, sync_id, request_id, request_hash, title, content, search_text, starred, continued_from_id, revision, created_at, updated_at, deleted_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`, note.ID, note.SyncID, requestID, requestHash, note.Title, note.Content,
-			normalizeSearch(note.Title+"\n"+note.Content), note.Starred, note.Revision, note.CreatedAt, note.UpdatedAt, note.DeletedAt); err != nil {
+		note.Kind = normalizedNoteKind(note.Kind)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO notes (id, sync_id, request_id, request_hash, title, content, search_text, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`, note.ID, note.SyncID, requestID, requestHash, note.Title, note.Content,
+			normalizeSearch(note.Title+"\n"+note.Content), note.Kind, note.Starred, note.Revision, note.CreatedAt, note.UpdatedAt, note.DeletedAt); err != nil {
 			return err
 		}
 	}
@@ -966,10 +1386,18 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 			return err
 		}
 	}
+	for _, note := range backup.Notes {
+		if note.DerivedFromID == nil {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE notes SET derived_from_id = ? WHERE id = ?`, *note.DerivedFromID, note.ID); err != nil {
+			return err
+		}
+	}
 	for _, revision := range backup.Revisions {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO note_revisions (note_id, revision, title, content, content_hash, starred, continued_from_id, deleted_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, revision.NoteID, revision.Revision, revision.Title, revision.Content, revision.ContentHash,
-			revision.Starred, revision.ContinuedFromID, revision.DeletedAt, revision.CreatedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO note_revisions (note_id, revision, title, content, content_hash, kind, starred, continued_from_id, derived_from_id, deleted_at, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, revision.NoteID, revision.Revision, revision.Title, revision.Content, revision.ContentHash,
+			normalizedNoteKind(revision.Kind), revision.Starred, revision.ContinuedFromID, revision.DerivedFromID, revision.DeletedAt, revision.CreatedAt); err != nil {
 			return err
 		}
 	}
@@ -995,6 +1423,26 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 			return err
 		}
 	}
+	for _, link := range backup.MaterialLinks {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO note_material_links (id, sync_id, note_id, material_id, created_at) VALUES (?, ?, ?, ?, ?)`, link.ID, link.SyncID, link.NoteID, link.MaterialID, link.CreatedAt); err != nil {
+			return err
+		}
+	}
+	for _, verification := range backup.Verifications {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO note_verifications (id, sync_id, note_id, note_revision, verified_at, environment, result, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, verification.ID, verification.SyncID, verification.NoteID, verification.NoteRevision, verification.VerifiedAt, verification.Environment, verification.Result, verification.Comment); err != nil {
+			return err
+		}
+	}
+	for _, topic := range backup.Topics {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`, topic.ID, topic.SyncID, topic.Name, topic.CreatedAt, topic.UpdatedAt, topic.DeletedAt); err != nil {
+			return err
+		}
+	}
+	for _, membership := range backup.TopicMemberships {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO topic_memberships (id, sync_id, topic_id, note_id, pinned, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, membership.ID, membership.SyncID, membership.TopicID, membership.NoteID, membership.Pinned, membership.CreatedAt, membership.UpdatedAt, membership.DeletedAt); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -1003,7 +1451,7 @@ type queryer interface {
 }
 
 func allNotes(ctx context.Context, q queryer) ([]Note, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at
 		FROM notes ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
@@ -1021,7 +1469,7 @@ func allNotes(ctx context.Context, q queryer) ([]Note, error) {
 }
 
 func allRevisions(ctx context.Context, q queryer) ([]NoteRevision, error) {
-	rows, err := q.QueryContext(ctx, `SELECT note_id, revision, title, content, content_hash, starred, continued_from_id, deleted_at, created_at
+	rows, err := q.QueryContext(ctx, `SELECT note_id, revision, title, content, content_hash, kind, starred, continued_from_id, derived_from_id, deleted_at, created_at
 		FROM note_revisions ORDER BY note_id ASC, revision ASC`)
 	if err != nil {
 		return nil, err
@@ -1032,14 +1480,18 @@ func allRevisions(ctx context.Context, q queryer) ([]NoteRevision, error) {
 		var revision NoteRevision
 		var starred int
 		var continued sql.NullString
+		var derived sql.NullString
 		var deleted sql.NullString
 		if err := rows.Scan(&revision.NoteID, &revision.Revision, &revision.Title, &revision.Content, &revision.ContentHash,
-			&starred, &continued, &deleted, &revision.CreatedAt); err != nil {
+			&revision.Kind, &starred, &continued, &derived, &deleted, &revision.CreatedAt); err != nil {
 			return nil, err
 		}
 		revision.Starred = starred != 0
 		if continued.Valid {
 			revision.ContinuedFromID = &continued.String
+		}
+		if derived.Valid {
+			revision.DerivedFromID = &derived.String
 		}
 		if deleted.Valid {
 			revision.DeletedAt = &deleted.String
@@ -1064,6 +1516,74 @@ func allSources(ctx context.Context, q queryer) ([]NoteSource, error) {
 		sources = append(sources, source)
 	}
 	return sources, rows.Err()
+}
+
+func allMaterialLinks(ctx context.Context, q queryer) ([]NoteMaterialLink, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, note_id, material_id, created_at FROM note_material_links ORDER BY note_id ASC, created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	links := make([]NoteMaterialLink, 0)
+	for rows.Next() {
+		var link NoteMaterialLink
+		if err := rows.Scan(&link.ID, &link.SyncID, &link.NoteID, &link.MaterialID, &link.CreatedAt); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
+func allVerifications(ctx context.Context, q queryer) ([]NoteVerification, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, note_id, note_revision, verified_at, environment, result, comment FROM note_verifications ORDER BY note_id ASC, verified_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	verifications := make([]NoteVerification, 0)
+	for rows.Next() {
+		var verification NoteVerification
+		if err := rows.Scan(&verification.ID, &verification.SyncID, &verification.NoteID, &verification.NoteRevision, &verification.VerifiedAt, &verification.Environment, &verification.Result, &verification.Comment); err != nil {
+			return nil, err
+		}
+		verifications = append(verifications, verification)
+	}
+	return verifications, rows.Err()
+}
+
+func allTopics(ctx context.Context, q queryer) ([]Topic, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at FROM topics ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	topics := make([]Topic, 0)
+	for rows.Next() {
+		var topic Topic
+		if err := rows.Scan(&topic.ID, &topic.SyncID, &topic.Name, &topic.CreatedAt, &topic.UpdatedAt, &topic.DeletedAt); err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
+	}
+	return topics, rows.Err()
+}
+
+func allTopicMemberships(ctx context.Context, q queryer) ([]TopicMembership, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, topic_id, note_id, pinned, created_at, updated_at, deleted_at FROM topic_memberships ORDER BY topic_id ASC, created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	memberships := make([]TopicMembership, 0)
+	for rows.Next() {
+		var membership TopicMembership
+		if err := rows.Scan(&membership.ID, &membership.SyncID, &membership.TopicID, &membership.NoteID, &membership.Pinned, &membership.CreatedAt, &membership.UpdatedAt, &membership.DeletedAt); err != nil {
+			return nil, err
+		}
+		memberships = append(memberships, membership)
+	}
+	return memberships, rows.Err()
 }
 
 func backupRequests(ctx context.Context, q queryer) ([]BackupRequest, error) {
@@ -1096,9 +1616,54 @@ func (s *Store) MarkdownExport(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	materialLinks, err := s.ListMaterialLinks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	verifications, err := s.ListVerifications(ctx)
+	if err != nil {
+		return nil, err
+	}
+	topics, err := s.ListTopics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	memberships, err := s.ListTopicMemberships(ctx)
+	if err != nil {
+		return nil, err
+	}
 	sourceByNote := make(map[string]NoteSource, len(sources))
+	noteByID := make(map[string]Note, len(notes))
+	topicByID := make(map[string]Topic, len(topics))
+	topicNamesByNote := make(map[string][]string)
+	materialIDsByNote := make(map[string]map[string]struct{})
+	verificationsByNote := make(map[string][]NoteVerification)
+	for _, note := range notes {
+		noteByID[note.ID] = note
+	}
+	for _, topic := range topics {
+		if topic.DeletedAt == nil {
+			topicByID[topic.ID] = topic
+		}
+	}
+	for _, membership := range memberships {
+		if membership.DeletedAt == nil {
+			if topic, exists := topicByID[membership.TopicID]; exists {
+				topicNamesByNote[membership.NoteID] = append(topicNamesByNote[membership.NoteID], topic.Name)
+			}
+		}
+	}
 	for _, source := range sources {
 		sourceByNote[source.NoteID] = source
+	}
+	for _, link := range materialLinks {
+		if materialIDsByNote[link.NoteID] == nil {
+			materialIDsByNote[link.NoteID] = make(map[string]struct{})
+		}
+		materialIDsByNote[link.NoteID][link.MaterialID] = struct{}{}
+	}
+	for _, verification := range verifications {
+		verificationsByNote[verification.NoteID] = append(verificationsByNote[verification.NoteID], verification)
 	}
 	var out strings.Builder
 	out.WriteString("# ThoughtGlean export\n\n")
@@ -1116,6 +1681,50 @@ func (s *Store) MarkdownExport(ctx context.Context) ([]byte, error) {
 			out.WriteString("## Untitled note\n\n")
 		}
 		fmt.Fprintf(&out, "<!-- thoughtglean:id=%s revision=%d createdAt=%s updatedAt=%s -->\n\n", note.ID, note.Revision, note.CreatedAt, note.UpdatedAt)
+		if topicNames := topicNamesByNote[note.ID]; len(topicNames) > 0 {
+			slices.Sort(topicNames)
+			fmt.Fprintf(&out, "主题：%s\n\n", strings.Join(topicNames, "、"))
+		}
+		if note.Kind == "procedure" {
+			status := "未实际验证"
+			currentVerification := false
+			for _, verification := range verificationsByNote[note.ID] {
+				if verification.NoteRevision != note.Revision {
+					continue
+				}
+				currentVerification = true
+				switch verification.Result {
+				case "success":
+					status = "已验证 · " + verification.Environment
+				case "partial":
+					status = "最近使用部分成功"
+				case "failed":
+					status = "最近使用失败"
+				}
+			}
+			if !currentVerification && len(verificationsByNote[note.ID]) > 0 {
+				status = "当前版本待重新验证"
+			}
+			fmt.Fprintf(&out, "类型：操作记录\n\n状态：%s\n\n", status)
+		} else if note.Kind == "material" {
+			out.WriteString("类型：原始素材\n\n")
+		}
+		if materialIDsByNote[note.ID] == nil {
+			materialIDsByNote[note.ID] = make(map[string]struct{})
+		}
+		if note.DerivedFromID != nil {
+			materialIDsByNote[note.ID][*note.DerivedFromID] = struct{}{}
+		}
+		materialTitles := make([]string, 0, len(materialIDsByNote[note.ID]))
+		for materialID := range materialIDsByNote[note.ID] {
+			if material, exists := noteByID[materialID]; exists {
+				materialTitles = append(materialTitles, material.Title)
+			}
+		}
+		if len(materialTitles) > 0 {
+			slices.Sort(materialTitles)
+			fmt.Fprintf(&out, "提炼自：%s\n\n", strings.Join(materialTitles, "、"))
+		}
 		if source, exists := sourceByNote[note.ID]; exists {
 			title := source.Title
 			if title == "" {
@@ -1160,14 +1769,49 @@ func (s *Store) UpdateNote(ctx context.Context, id string, in UpdateNoteInput) (
 		}
 		current.Content = *in.Content
 	}
+	if in.Kind != nil {
+		kind := normalizedNoteKind(*in.Kind)
+		if !validNoteKind(kind) {
+			return Note{}, invalidInput("unknown note kind")
+		}
+		if current.DerivedFromID != nil && kind != "procedure" {
+			return Note{}, invalidInput("only procedure notes can reference source material")
+		}
+		if kind != "procedure" {
+			var sourceCount int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM note_material_links WHERE note_id = ?`, current.ID).Scan(&sourceCount); err != nil {
+				return Note{}, err
+			}
+			if sourceCount > 0 {
+				return Note{}, invalidInput("only procedure notes can reference source material")
+			}
+			var pinnedCount int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM topic_memberships WHERE note_id = ? AND pinned = 1 AND deleted_at IS NULL`, current.ID).Scan(&pinnedCount); err != nil {
+				return Note{}, err
+			}
+			if pinnedCount > 0 {
+				return Note{}, invalidInput("a topic-pinned procedure cannot change kind")
+			}
+		}
+		if current.Kind == "material" && kind != "material" {
+			var derivedCount int
+			if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM notes WHERE derived_from_id = ?) + (SELECT COUNT(*) FROM note_material_links WHERE material_id = ?)`, current.ID, current.ID).Scan(&derivedCount); err != nil {
+				return Note{}, err
+			}
+			if derivedCount > 0 {
+				return Note{}, invalidInput("source material is referenced by procedure notes")
+			}
+		}
+		current.Kind = kind
+	}
 	if in.Starred != nil {
 		current.Starred = *in.Starred
 	}
 	current.Revision++
 	current.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE notes SET title = ?, content = ?, search_text = ?, starred = ?, revision = ?, updated_at = ?
+	result, err := tx.ExecContext(ctx, `UPDATE notes SET title = ?, content = ?, search_text = ?, kind = ?, starred = ?, revision = ?, updated_at = ?
 		WHERE id = ? AND revision = ? AND deleted_at IS NULL`,
-		current.Title, current.Content, normalizeSearch(current.Title+"\n"+current.Content), current.Starred, current.Revision, current.UpdatedAt, id, in.ExpectedRevision)
+		current.Title, current.Content, normalizeSearch(current.Title+"\n"+current.Content), current.Kind, current.Starred, current.Revision, current.UpdatedAt, id, in.ExpectedRevision)
 	if err != nil {
 		return Note{}, err
 	}
@@ -1260,7 +1904,7 @@ func (s *Store) contextSide(ctx context.Context, current Note, count int, before
 	if !before {
 		op, order = ">", "ASC"
 	}
-	query := fmt.Sprintf(`SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at
+	query := fmt.Sprintf(`SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at
 		FROM notes WHERE deleted_at IS NULL AND (created_at %s ? OR (created_at = ? AND id %s ?))
 		ORDER BY created_at %s, id %s LIMIT ?`, op, op, order, order)
 	rows, err := s.db.QueryContext(ctx, query, current.CreatedAt, current.CreatedAt, current.ID, count)
@@ -1286,7 +1930,7 @@ type rowScanner interface {
 func getNote(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, id string) (Note, error) {
-	row := q.QueryRowContext(ctx, `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at FROM notes WHERE id = ?`, id)
+	row := q.QueryRowContext(ctx, `SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at FROM notes WHERE id = ?`, id)
 	note, err := scanNote(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Note{}, ErrNotFound
@@ -1297,13 +1941,14 @@ func getNote(ctx context.Context, q interface {
 func getNoteByRequestID(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, requestID string) (Note, string, error) {
-	row := q.QueryRowContext(ctx, `SELECT id, sync_id, title, content, starred, continued_from_id, revision, created_at, updated_at, deleted_at, request_hash FROM notes WHERE request_id = ?`, requestID)
+	row := q.QueryRowContext(ctx, `SELECT id, sync_id, title, content, kind, starred, continued_from_id, derived_from_id, revision, created_at, updated_at, deleted_at, request_hash FROM notes WHERE request_id = ?`, requestID)
 	var note Note
 	var starred int
 	var continued sql.NullString
+	var derived sql.NullString
 	var deleted sql.NullString
 	var requestHash sql.NullString
-	err := row.Scan(&note.ID, &note.SyncID, &note.Title, &note.Content, &starred, &continued, &note.Revision, &note.CreatedAt, &note.UpdatedAt, &deleted, &requestHash)
+	err := row.Scan(&note.ID, &note.SyncID, &note.Title, &note.Content, &note.Kind, &starred, &continued, &derived, &note.Revision, &note.CreatedAt, &note.UpdatedAt, &deleted, &requestHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Note{}, "", ErrNotFound
 	}
@@ -1313,6 +1958,9 @@ func getNoteByRequestID(ctx context.Context, q interface {
 	note.Starred = starred != 0
 	if continued.Valid {
 		note.ContinuedFromID = &continued.String
+	}
+	if derived.Valid {
+		note.DerivedFromID = &derived.String
 	}
 	if deleted.Valid {
 		note.DeletedAt = &deleted.String
@@ -1324,14 +1972,18 @@ func scanNote(row rowScanner) (Note, error) {
 	var note Note
 	var starred int
 	var continued sql.NullString
+	var derived sql.NullString
 	var deleted sql.NullString
-	err := row.Scan(&note.ID, &note.SyncID, &note.Title, &note.Content, &starred, &continued, &note.Revision, &note.CreatedAt, &note.UpdatedAt, &deleted)
+	err := row.Scan(&note.ID, &note.SyncID, &note.Title, &note.Content, &note.Kind, &starred, &continued, &derived, &note.Revision, &note.CreatedAt, &note.UpdatedAt, &deleted)
 	if err != nil {
 		return Note{}, err
 	}
 	note.Starred = starred != 0
 	if continued.Valid {
 		note.ContinuedFromID = &continued.String
+	}
+	if derived.Valid {
+		note.DerivedFromID = &derived.String
 	}
 	if deleted.Valid {
 		note.DeletedAt = &deleted.String
@@ -1342,9 +1994,9 @@ func scanNote(row rowScanner) (Note, error) {
 func insertRevision(ctx context.Context, tx *sql.Tx, note Note) error {
 	hash := sha256.Sum256([]byte(note.Content))
 	_, err := tx.ExecContext(ctx, `INSERT INTO note_revisions
-		(note_id, revision, title, content, content_hash, starred, continued_from_id, deleted_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		note.ID, note.Revision, note.Title, note.Content, hex.EncodeToString(hash[:]), note.Starred, note.ContinuedFromID, note.DeletedAt, note.UpdatedAt)
+		(note_id, revision, title, content, content_hash, kind, starred, continued_from_id, derived_from_id, deleted_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		note.ID, note.Revision, note.Title, note.Content, hex.EncodeToString(hash[:]), normalizedNoteKind(note.Kind), note.Starred, note.ContinuedFromID, note.DerivedFromID, note.DeletedAt, note.UpdatedAt)
 	return err
 }
 
@@ -1384,6 +2036,21 @@ func validSyncID(id string) bool {
 	return true
 }
 
+func normalizedNoteKind(kind string) string {
+	if kind == "" {
+		return "note"
+	}
+	return kind
+}
+
+func validNoteKind(kind string) bool {
+	return kind == "note" || kind == "procedure" || kind == "material"
+}
+
+func validVerificationResult(result string) bool {
+	return result == "success" || result == "partial" || result == "failed"
+}
+
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -1401,6 +2068,8 @@ func migrate(db *sql.DB) error {
 	}
 	hasRequestHash := false
 	hasSyncID := false
+	hasKind := false
+	hasDerivedFromID := false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -1415,6 +2084,12 @@ func migrate(db *sql.DB) error {
 		if name == "sync_id" {
 			hasSyncID = true
 		}
+		if name == "kind" {
+			hasKind = true
+		}
+		if name == "derived_from_id" {
+			hasDerivedFromID = true
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -1426,6 +2101,16 @@ func migrate(db *sql.DB) error {
 	}
 	if !hasSyncID {
 		if _, err := tx.Exec(`ALTER TABLE notes ADD COLUMN sync_id TEXT`); err != nil {
+			return err
+		}
+	}
+	if !hasKind {
+		if _, err := tx.Exec(`ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note' CHECK (kind IN ('note', 'procedure', 'material'))`); err != nil {
+			return err
+		}
+	}
+	if !hasDerivedFromID {
+		if _, err := tx.Exec(`ALTER TABLE notes ADD COLUMN derived_from_id TEXT REFERENCES notes(id) ON DELETE SET NULL`); err != nil {
 			return err
 		}
 	}
@@ -1456,6 +2141,75 @@ func migrate(db *sql.DB) error {
 	}
 	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_sync_id ON notes(sync_id)`); err != nil {
 		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notes_derived_from ON notes(derived_from_id)`); err != nil {
+		return err
+	}
+	rows, err = tx.Query(`SELECT id, derived_from_id FROM notes WHERE derived_from_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1 FROM note_material_links WHERE note_id = notes.id AND material_id = notes.derived_from_id)`)
+	if err != nil {
+		return err
+	}
+	type missingMaterialLink struct{ noteID, materialID string }
+	missingLinks := make([]missingMaterialLink, 0)
+	for rows.Next() {
+		var link missingMaterialLink
+		if err := rows.Scan(&link.noteID, &link.materialID); err != nil {
+			rows.Close()
+			return err
+		}
+		missingLinks = append(missingLinks, link)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, link := range missingLinks {
+		id, err := newSyncID()
+		if err != nil {
+			return err
+		}
+		syncID, err := newSyncID()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO note_material_links (id, sync_id, note_id, material_id, created_at) SELECT ?, ?, ?, ?, updated_at FROM notes WHERE id = ?`, id, syncID, link.noteID, link.materialID, link.noteID); err != nil {
+			return err
+		}
+	}
+
+	rows, err = tx.Query(`PRAGMA table_info(note_revisions)`)
+	if err != nil {
+		return err
+	}
+	hasRevisionKind := false
+	hasRevisionDerivedFromID := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "kind" {
+			hasRevisionKind = true
+		}
+		if name == "derived_from_id" {
+			hasRevisionDerivedFromID = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasRevisionKind {
+		if _, err := tx.Exec(`ALTER TABLE note_revisions ADD COLUMN kind TEXT NOT NULL DEFAULT 'note' CHECK (kind IN ('note', 'procedure', 'material'))`); err != nil {
+			return err
+		}
+	}
+	if !hasRevisionDerivedFromID {
+		if _, err := tx.Exec(`ALTER TABLE note_revisions ADD COLUMN derived_from_id TEXT`); err != nil {
+			return err
+		}
 	}
 
 	rows, err = tx.Query(`PRAGMA table_info(note_sources)`)
@@ -1599,6 +2353,16 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 		if _, err := tx.Exec(`PRAGMA user_version = 3`); err != nil {
+			return err
+		}
+	}
+	if schemaVersion < 4 {
+		if _, err := tx.Exec(`PRAGMA user_version = 4`); err != nil {
+			return err
+		}
+	}
+	if schemaVersion < 5 {
+		if _, err := tx.Exec(`PRAGMA user_version = 5`); err != nil {
 			return err
 		}
 	}

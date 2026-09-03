@@ -18,14 +18,23 @@ function openShareDB() {
   });
 }
 
-export async function takeSharedItems(): Promise<SharedItem[]> {
+export async function readSharedItems(): Promise<SharedItem[]> {
   const database = await openShareDB();
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction("inbox", "readwrite");
+    const transaction = database.transaction("inbox", "readonly");
     const store = transaction.objectStore("inbox");
     const request = store.getAll();
-    request.onsuccess = () => store.clear();
     transaction.oncomplete = () => { database.close(); resolve(request.result as SharedItem[]); };
+    transaction.onerror = () => { database.close(); reject(transaction.error); };
+  });
+}
+
+export async function clearSharedItems() {
+  const database = await openShareDB();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction("inbox", "readwrite");
+    transaction.objectStore("inbox").clear();
+    transaction.oncomplete = () => { database.close(); resolve(); };
     transaction.onerror = () => { database.close(); reject(transaction.error); };
   });
 }

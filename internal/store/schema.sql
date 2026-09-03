@@ -8,13 +8,16 @@ CREATE TABLE IF NOT EXISTS notes (
     title TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     search_text TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note' CHECK (kind IN ('note', 'procedure', 'material')),
     starred INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
     continued_from_id TEXT REFERENCES notes(id) ON DELETE SET NULL,
+    derived_from_id TEXT REFERENCES notes(id) ON DELETE SET NULL,
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT,
-    CHECK (continued_from_id IS NULL OR continued_from_id != id)
+    CHECK (continued_from_id IS NULL OR continued_from_id != id),
+    CHECK (derived_from_id IS NULL OR (kind = 'procedure' AND derived_from_id != id))
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_recent
@@ -23,6 +26,66 @@ CREATE INDEX IF NOT EXISTS idx_notes_starred
     ON notes(deleted_at, starred, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_continued_from
     ON notes(continued_from_id);
+CREATE INDEX IF NOT EXISTS idx_notes_derived_from
+    ON notes(derived_from_id);
+
+CREATE TABLE IF NOT EXISTS note_material_links (
+    id TEXT PRIMARY KEY,
+    sync_id TEXT NOT NULL UNIQUE,
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    material_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    UNIQUE(note_id, material_id),
+    CHECK (note_id != material_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_material_links_note
+    ON note_material_links(note_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_note_material_links_material
+    ON note_material_links(material_id, created_at);
+
+CREATE TABLE IF NOT EXISTS note_verifications (
+    id TEXT PRIMARY KEY,
+    sync_id TEXT NOT NULL UNIQUE,
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    note_revision INTEGER NOT NULL CHECK (note_revision > 0),
+    verified_at TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    result TEXT NOT NULL CHECK (result IN ('success', 'partial', 'failed')),
+    comment TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_verifications_note
+    ON note_verifications(note_id, verified_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS topics (
+    id TEXT PRIMARY KEY,
+    sync_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_topics_active
+    ON topics(deleted_at, updated_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS topic_memberships (
+    id TEXT PRIMARY KEY,
+    sync_id TEXT NOT NULL UNIQUE,
+    topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    UNIQUE(topic_id, note_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_memberships_topic
+    ON topic_memberships(topic_id, deleted_at, pinned DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_topic_memberships_note
+    ON topic_memberships(note_id, deleted_at, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS note_revisions (
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -30,8 +93,10 @@ CREATE TABLE IF NOT EXISTS note_revisions (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note' CHECK (kind IN ('note', 'procedure', 'material')),
     starred INTEGER NOT NULL CHECK (starred IN (0, 1)),
     continued_from_id TEXT,
+    derived_from_id TEXT,
     deleted_at TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (note_id, revision)

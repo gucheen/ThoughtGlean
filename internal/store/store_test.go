@@ -326,6 +326,152 @@ func TestContinuedNoteContext(t *testing.T) {
 	}
 }
 
+func TestDerivedProcedurePreservesSourceMaterialAcrossBackup(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	material, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "Docker 对话", Content: "原始内容", Kind: "material"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	procedure, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "查看 Docker 占用", Content: "状态：未实际验证", Kind: "procedure", DerivedFromID: &material.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if procedure.Kind != "procedure" || procedure.DerivedFromID == nil || *procedure.DerivedFromID != material.ID {
+		t.Fatalf("procedure=%#v", procedure)
+	}
+	if _, _, err := store.CreateNote(ctx, CreateNoteInput{Content: "错误关系", Kind: "procedure", DerivedFromID: &procedure.ID}); err == nil {
+		t.Fatal("procedure accepted a non-material source")
+	}
+	if _, _, err := store.CreateNote(ctx, CreateNoteInput{Content: "错误类型", DerivedFromID: &material.ID}); err == nil {
+		t.Fatal("ordinary note accepted a source material relation")
+	}
+	ordinaryKind := "note"
+	if _, err := store.UpdateNote(ctx, material.ID, UpdateNoteInput{Kind: &ordinaryKind, ExpectedRevision: material.Revision}); err == nil {
+		t.Fatal("referenced source material changed into an ordinary note")
+	}
+	backup, err := store.BackupData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := testStore(t)
+	if err := target.RestoreBackup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := target.GetNote(ctx, procedure.ID)
+	if err != nil || restored.Kind != "procedure" || restored.DerivedFromID == nil || *restored.DerivedFromID != material.ID {
+		t.Fatalf("restored=%#v err=%v", restored, err)
+	}
+}
+
+func TestRemoteDerivedProcedureResolvesMaterialBySyncIdentity(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	material, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "来源", Content: "对话内容", Kind: "material"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := Note{SyncID: "remote-procedure-sync-id", Title: "远端操作", Content: "状态：未实际验证", Kind: "procedure", Revision: 1, CreatedAt: "2026-09-03T00:00:00Z", UpdatedAt: "2026-09-03T00:00:00Z"}
+	procedure, err := store.ApplyRemoteNoteWithRelations(ctx, remote, "", material.SyncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if procedure.DerivedFromID == nil || *procedure.DerivedFromID != material.ID {
+		t.Fatalf("procedure=%#v material=%#v", procedure, material)
+	}
+	remote.Kind = "note"
+	remote.SyncID = "remote-invalid-note-id"
+	if _, err := store.ApplyRemoteNoteWithRelations(ctx, remote, "", material.SyncID); err == nil {
+		t.Fatal("remote ordinary note accepted a source material relation")
+	}
+}
+
+func TestMaterialLinksAndVerificationsSurviveBackup(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	firstMaterial, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "第一次对话", Content: "原始内容", Kind: "material"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMaterial, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "补充对话", Content: "更新来源", Kind: "material"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	procedure, _, err := store.CreateNote(ctx, CreateNoteInput{Title: "查看 Docker 占用", Content: "docker system df -v", Kind: "procedure", DerivedFromID: &firstMaterial.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := store.ApplyRemoteMaterialLink(ctx, NoteMaterialLink{SyncID: "material-link-sync-id-01", CreatedAt: "2026-09-03T01:00:00Z"}, procedure.SyncID, secondMaterial.SyncID)
+	if err != nil || link.NoteID != procedure.ID || link.MaterialID != secondMaterial.ID {
+		t.Fatalf("link=%#v err=%v", link, err)
+	}
+	verification, err := store.ApplyRemoteVerification(ctx, NoteVerification{SyncID: "verification-sync-id-001", NoteRevision: procedure.Revision, VerifiedAt: "2026-09-03T02:00:00Z", Environment: "Ubuntu 24.04 / Docker 27", Result: "success", Comment: "执行成功"}, procedure.SyncID)
+	if err != nil || verification.NoteID != procedure.ID {
+		t.Fatalf("verification=%#v err=%v", verification, err)
+	}
+	backup, err := store.BackupData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backup.MaterialLinks) != 1 || len(backup.Verifications) != 1 {
+		t.Fatalf("backup links=%#v verifications=%#v", backup.MaterialLinks, backup.Verifications)
+	}
+	target := testStore(t)
+	if err := target.RestoreBackup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	links, _ := target.ListMaterialLinks(ctx)
+	verifications, _ := target.ListVerifications(ctx)
+	if len(links) != 1 || len(verifications) != 1 || verifications[0].NoteRevision != procedure.Revision {
+		t.Fatalf("restored links=%#v verifications=%#v", links, verifications)
+	}
+}
+
+func TestTopicsAndTopicPinningSurviveBackup(t *testing.T) {
+	noteStore := testStore(t)
+	ctx := context.Background()
+	procedure, _, err := noteStore.CreateNote(ctx, CreateNoteInput{Title: "重启 Nginx", Content: "systemctl restart nginx", Kind: "procedure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, _, err := noteStore.CreateNote(ctx, CreateNoteInput{Title: "故障记录", Content: "一次磁盘告警"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic, err := noteStore.ApplyRemoteTopic(ctx, Topic{SyncID: "topic-sync-server-admin-01", Name: "服务器管理", CreatedAt: "2026-09-03T03:00:00Z", UpdatedAt: "2026-09-03T03:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	membership, err := noteStore.ApplyRemoteTopicMembership(ctx, TopicMembership{SyncID: "membership-sync-nginx-001", Pinned: true, CreatedAt: "2026-09-03T03:01:00Z", UpdatedAt: "2026-09-03T03:01:00Z"}, topic.SyncID, procedure.SyncID)
+	if err != nil || membership.TopicID != topic.ID || membership.NoteID != procedure.ID || !membership.Pinned {
+		t.Fatalf("membership=%#v err=%v", membership, err)
+	}
+	if _, err := noteStore.ApplyRemoteTopicMembership(ctx, TopicMembership{SyncID: "membership-sync-ordinary-01", Pinned: true, CreatedAt: "2026-09-03T03:02:00Z", UpdatedAt: "2026-09-03T03:02:00Z"}, topic.SyncID, ordinary.SyncID); err == nil {
+		t.Fatal("ordinary note was pinned as a common operation")
+	}
+
+	backup, err := noteStore.BackupData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backup.Topics) != 1 || len(backup.TopicMemberships) != 1 {
+		t.Fatalf("backup topics=%#v memberships=%#v", backup.Topics, backup.TopicMemberships)
+	}
+	target := testStore(t)
+	if err := target.RestoreBackup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	topics, _ := target.ListTopics(ctx)
+	memberships, _ := target.ListTopicMemberships(ctx)
+	if len(topics) != 1 || topics[0].Name != "服务器管理" || len(memberships) != 1 || !memberships[0].Pinned {
+		t.Fatalf("restored topics=%#v memberships=%#v", topics, memberships)
+	}
+	data, err := target.MarkdownExport(ctx)
+	if err != nil || !strings.Contains(string(data), "主题：服务器管理") {
+		t.Fatalf("markdown=%s err=%v", data, err)
+	}
+}
+
 func TestBackupIncludesHistoryAndDetectsTampering(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
