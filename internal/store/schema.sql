@@ -26,8 +26,6 @@ CREATE INDEX IF NOT EXISTS idx_notes_starred
     ON notes(deleted_at, starred, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_continued_from
     ON notes(continued_from_id);
-CREATE INDEX IF NOT EXISTS idx_notes_derived_from
-    ON notes(derived_from_id);
 
 CREATE TABLE IF NOT EXISTS note_material_links (
     id TEXT PRIMARY KEY,

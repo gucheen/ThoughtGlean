@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -208,6 +209,65 @@ func TestRequestHashMigrationPreservesIdempotency(t *testing.T) {
 	var conflict *IdempotencyConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected migrated request hash conflict, got %v", err)
+	}
+}
+
+func TestMigrationAddsDerivedFromBeforeCreatingItsIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "thoughtglean.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE notes (
+			id TEXT PRIMARY KEY,
+			sync_id TEXT NOT NULL UNIQUE,
+			request_id TEXT UNIQUE,
+			request_hash TEXT,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			search_text TEXT NOT NULL,
+			starred INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
+			continued_from_id TEXT REFERENCES notes(id) ON DELETE SET NULL,
+			revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
+		INSERT INTO notes (
+			id, sync_id, title, content, search_text, starred, revision, created_at, updated_at
+		) VALUES (
+			'legacy-note-id', 'legacy-note-sync-id', '旧记录', '迁移前的正文', '旧记录\n迁移前的正文', 1, 1,
+			'2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
+		);
+		PRAGMA user_version = 4;
+	`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { migrated.Close() })
+	note, err := migrated.GetNote(context.Background(), "legacy-note-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Title != "旧记录" || note.Content != "迁移前的正文" || note.Kind != "note" || !note.Starred {
+		t.Fatalf("migrated note = %#v", note)
+	}
+	var indexCount int
+	if err := migrated.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_notes_derived_from'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("derived-from index count = %d, want 1", indexCount)
 	}
 }
 
