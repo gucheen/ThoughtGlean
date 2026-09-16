@@ -1,8 +1,8 @@
 # 拾念 · ThoughtGlean
 
-拾念是一个属于个人的思考记忆库：念头出现时轻轻留下，日后只凭半句话或大概时间重新找到，并从那里继续想下去。
+拾念是一个个人随手记：随手记下此刻的想法，需要时再找回来。
 
-它不是个人版团队知识库，也不要求先建立文件夹、卡片体系或知识图谱。产品取舍见 [docs/product-principles.md](docs/product-principles.md)。
+打开就能写，正文足够，写完就能离开。不要求分类、提炼或验证，也不要求每条记录都成为可复用知识。产品取舍见 [docs/product-principles.md](docs/product-principles.md)。
 
 ## 当前能力
 
@@ -11,17 +11,17 @@
 - Go + SQLite 服务端权威存储和跨设备同步；
 - Passkey 优先登录，个人访问密钥作为首次设置和恢复入口；
 - 随机 ID、revision 冲突保护、软删除与恢复；
-- 时间流、星标、多词搜索、来源、续记与 Markdown 正文；
-- 分享文本整理为可复用的操作记录，支持相似记录更新与多份“提炼自”来源；
-- 按 revision 记录实际使用结果和环境，并直接从搜索结果复制命令；
-- 可选的轻量主题支持人工归类、主题内常用操作置顶，以及主题重命名和删除；
+- 首页快速记录、自动保存草稿、按创建时间排列的时间流与星标；
+- 多词搜索、按需展开的图片和时间筛选、续写与 Markdown 正文；
+- 分享文本直接保存为普通记录，或追加到现有草稿；
+- 旧素材可通过搜索和设置中的“全部记录”找回；旧主题、来源关系和使用历史保留在次级入口；
 - 多图片粘贴/上传、编辑模式删除与大图查看；
 - JSON 完整备份、恢复和 Markdown 导出；
 - Docker Compose 单入口部署。
 
 服务端保存权威数据，浏览器保留离线副本和待上传操作。首次用个人访问密钥登录后，可在设置中添加 Passkey；完整设计见 [docs/server-sync.md](docs/server-sync.md)。
 
-对话整理与操作记录的产品边界、交互和后续阶段见 [docs/conversation-distillation-product-design.md](docs/conversation-distillation-product-design.md)。
+主流程不再提供操作提炼、使用验证和主题管理。已有数据继续参与同步、备份与恢复；[对话提炼方案](docs/conversation-distillation-product-design.md)仅作为历史设计保留，不作为后续功能路线。
 
 ## 本地开发
 

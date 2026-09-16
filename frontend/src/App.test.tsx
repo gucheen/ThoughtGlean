@@ -46,6 +46,7 @@ describe("core note interactions", () => {
     expect(within(relations).getByRole("button", { name: /最初的想法/ })).toBeInTheDocument();
     expect(within(relations).getByRole("button", { name: /继续深入/ })).toBeInTheDocument();
     expect(within(relations).queryByText("另一个方向")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("当时的记录", { selector: "summary" }));
     const timeline = screen.getByRole("region", { name: "当时的记录" });
     expect(within(timeline).queryByText(root.title)).not.toBeInTheDocument();
     expect(within(timeline).getByText("当时的其他记录 3")).toBeInTheDocument();
@@ -118,78 +119,83 @@ describe("core note interactions", () => {
     expect((await db.notes.toArray()).find(note => note.id !== original.id)?.continuedFromId).toBeUndefined();
   });
 
-  it("keeps a shared conversation recoverable and saves a derived operation as unverified", async () => {
+  it("saves shared text as an ordinary note with its URL, without touching existing notes", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
-    await writeLibraryMetadata("share.pending.v1", [{
-      id: "shared-docker", title: "Docker 磁盘管理对话", text: "用户：磁盘满了怎么办？\nAI：先运行 docker system df -v。", url: "", createdAt: now(),
-    }]);
+    const existing = noteFixture("existing", "已有操作", now(), { kind: "procedure" });
+    await db.notes.put(existing);
+    await writeLibraryMetadata("share.pending.v1", [{ id: "share", title: "随手分享", text: "今天看到的一段话", url: "https://example.com/source", createdAt: now() }]);
     render(<App />);
-
-    expect(await screen.findByRole("dialog", { name: "整理分享内容" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "整理为操作记录" }));
-    const procedureDraft = screen.getByRole("textbox", { name: "操作记录草稿" });
-    fireEvent.change(procedureDraft, { target: { value: "# 查看 Docker 磁盘占用\n\n状态：未实际验证\n\n```bash\ndocker system df -v\n```" } });
-    await userEvent.click(screen.getByRole("button", { name: "保存并完成" }));
-
+    await userEvent.click(await screen.findByRole("button", { name: "收到的分享" }));
+    await userEvent.click(await screen.findByRole("button", { name: "保存记录" }));
     await waitFor(async () => expect(await db.notes.count()).toBe(2));
-    const notes = await db.notes.toArray();
-    const material = notes.find(note => note.kind === "material")!;
-    const procedure = notes.find(note => note.kind === "procedure")!;
-    expect(material.content).toContain("用户：磁盘满了怎么办");
-    expect(procedure).toMatchObject({ title: "查看 Docker 磁盘占用", derivedFromId: material.id });
-    expect(procedure.content).toContain("状态：未实际验证");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "整理分享内容" })).not.toBeInTheDocument());
-    expect(await screen.findByText(/操作记录 · revision 1/)).toBeInTheDocument();
-    expect(screen.getAllByText(/未实际验证/).length).toBeGreaterThan(0);
+    const note = (await db.notes.toArray()).find(item => item.id !== existing.id)!;
+    expect(note).toMatchObject({ kind: "note", title: "随手分享", content: "今天看到的一段话\n\nhttps://example.com/source" });
+    expect(await db.notes.get(existing.id)).toEqual(existing);
+    expect(await db.materialLinks.count()).toBe(0);
+    expect(await db.verifications.count()).toBe(0);
+    expect((await db.metadata.get("share.pending.v1"))?.value).toEqual([]);
+    expect(await screen.findByRole("heading", { name: "随手分享" })).toBeInTheDocument();
   });
 
-  it("keeps source materials out of the default timeline and exposes an explicit filter", async () => {
-    const material = noteFixture("material", "Docker 原始对话", now(), { kind: "material" });
-    const procedure = noteFixture("procedure", "查看 Docker 占用", now(), { kind: "procedure", derivedFromId: material.id });
-    await db.notes.bulkPut([material, procedure]);
-    render(<App />);
 
-    expect(await screen.findByText(procedure.title)).toBeInTheDocument();
-    expect(screen.queryByText(material.title)).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "原始素材" }));
-    expect(await screen.findByText(material.title)).toBeInTheDocument();
-    expect(screen.queryByText(procedure.title)).not.toBeInTheDocument();
-  });
-
-  it("records use against the current revision and marks it stale after an edit", async () => {
+  it("finds old materials through search, all records, and the trash", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
-    const procedure = noteFixture("verified-procedure", "检查 Nginx 服务", now(), { kind: "procedure", content: "```bash\nsystemctl status nginx\n```" });
-    await db.notes.put(procedure);
-    history.replaceState(null, "", `/notes/${procedure.id}`);
+    const material = noteFixture("material", "旧对话素材", now(), { kind: "material" });
+    const deleted = noteFixture("deleted-material", "已删除素材", now(), { kind: "material", deletedAt: now() });
+    await db.notes.bulkPut([material, deleted]);
     render(<App />);
-
-    await userEvent.click(await screen.findByRole("button", { name: "记录一次使用" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "使用环境" }), "Ubuntu 24.04 / nginx 1.26");
-    await userEvent.type(screen.getByRole("textbox", { name: "使用备注" }), "服务正常");
-    await userEvent.click(screen.getByRole("button", { name: "保存使用记录" }));
-
-    await waitFor(async () => expect(await db.verifications.count()).toBe(1));
-    expect(await screen.findByText("已验证 · Ubuntu 24.04 / nginx 1.26")).toBeInTheDocument();
-    const saved = (await db.notes.get(procedure.id))!;
-    await saveNote({ ...saved, content: `${saved.content}\n\n补充检查`, revision: 2, updatedAt: now() }, false);
-    expect(await screen.findByText("正文更新后待重新验证")).toBeInTheDocument();
-    expect(screen.getByText("旧 revision 1")).toBeInTheDocument();
+    const search = await screen.findByRole("searchbox");
+    expect(screen.queryByText(material.title)).not.toBeInTheDocument();
+    await userEvent.type(search, "旧对话");
+    expect(await screen.findByRole("button", { name: /旧对话素材/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "全部记录" }));
+    expect(await screen.findByText(material.title)).toBeInTheDocument();
+    expect(search).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "回收站" }));
+    expect(await screen.findByText(deleted.title)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "恢复" }));
+    await waitFor(async () => expect((await db.notes.get(deleted.id))?.deletedAt).toBeUndefined());
   });
 
-  it("filters procedures by current verification status", async () => {
-    const verified = noteFixture("verified", "已验证操作", now(), { kind: "procedure" });
-    const pending = noteFixture("pending", "待验证操作", now(), { kind: "procedure" });
-    await db.notes.bulkPut([verified, pending]);
-    await db.verifications.put({ id: "verification", syncId: "sync-verification", noteId: verified.id, noteRevision: 1, verifiedAt: now(), environment: "Ubuntu 24.04", result: "success", comment: "" });
-    render(<App />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "已验证" }));
-    expect(await screen.findByText(verified.title)).toBeInTheDocument();
-    expect(screen.queryByText(pending.title)).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "待验证" }));
-    expect(await screen.findByText(pending.title)).toBeInTheDocument();
-    expect(screen.queryByText(verified.title)).not.toBeInTheDocument();
+  it("preserves old verification history behind a disclosure without maintenance actions", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const note = noteFixture("procedure", "旧操作", now(), { kind: "procedure", revision: 2 });
+    await db.notes.put(note);
+    const verification = { id: "verification", syncId: "sync-verification", noteId: note.id, noteRevision: 1, verifiedAt: now(), environment: "Ubuntu 24.04", result: "success" as const, comment: "服务正常" };
+    await db.verifications.put(verification);
+    history.replaceState(null, "", `/notes/${note.id}`);
+    render(<App />);
+    const disclosure = await screen.findByText("以往的使用记录");
+    expect(disclosure.closest("details")).not.toHaveAttribute("open");
+    expect(screen.queryByRole("button", { name: "记录一次使用" })).not.toBeInTheDocument();
+    await userEvent.click(disclosure);
+    expect(screen.getByText("Ubuntu 24.04")).toBeVisible();
+    expect(screen.getByText("正文更新后待重新验证")).toBeVisible();
+    expect(await db.verifications.get(verification.id)).toEqual(verification);
   });
+
+
+  it("keeps capture first and starts new notes outside search and star filters", async () => {
+    await db.notes.put(noteFixture("old", "旧操作", now(), { kind: "procedure" }));
+    render(<App />);
+    await screen.findByRole("textbox", { name: "随手记" });
+    expect(screen.queryByRole("button", { name: "主题" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "已验证" })).not.toBeInTheDocument();
+    expect(screen.queryByText("未实际验证")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "星标" }));
+    await userEvent.type(screen.getByRole("searchbox"), "不会命中");
+    await userEvent.click(screen.getByRole("button", { name: /新记录/ }));
+    expect(screen.getByRole("searchbox")).toHaveValue("");
+    expect(window.location.pathname).toBe("/");
+    const capture = screen.getByRole("textbox", { name: "随手记" });
+    fireEvent.change(capture, { target: { value: "只记一句话" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("只记一句话", { selector: ".note-row-title" })).toBeInTheDocument();
+  });
+
 
   it("shows and copies a matching command directly from search results", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -202,25 +208,41 @@ describe("core note interactions", () => {
     expect(writeText).toHaveBeenCalledWith("docker system df -v");
   });
 
-  it("updates a similar procedure and appends the new source material", async () => {
+  it("appends sharing to a recoverable home draft without replacing existing text", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
-    const existing = noteFixture("existing-procedure", "查看 Docker 磁盘占用", "2026-08-01T00:00:00Z", { kind: "procedure", content: "```bash\ndocker system df\n```" });
-    await db.notes.put(existing);
-    await writeLibraryMetadata("share.pending.v1", [{ id: "shared-update", title: existing.title, text: "AI：使用 docker system df -v 查看详细占用。", url: "", createdAt: now() }]);
+    await writeLibraryMetadata("draft.home.v1", { content: "没写完的想法" });
+    await writeLibraryMetadata("share.pending.v1", [{ id: "share", title: "", text: "补充一句", url: "https://example.com", createdAt: now() }]);
+    const app = render(<App />);
+    expect(await screen.findByRole("textbox", { name: "随手记" })).toHaveValue("没写完的想法");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "收到的分享" }));
+    await userEvent.click(await screen.findByRole("button", { name: "加入草稿" }));
+    const content = "没写完的想法\n\n补充一句\n\nhttps://example.com";
+    expect(screen.getByRole("textbox", { name: "随手记" })).toHaveValue(content);
+    expect((await db.metadata.get("draft.home.v1"))?.value).toMatchObject({ content });
+    expect((await db.metadata.get("share.pending.v1"))?.value).toEqual([]);
+    app.unmount();
     render(<App />);
-
-    await userEvent.click(await screen.findByRole("button", { name: "整理为操作记录" }));
-    await userEvent.click(await screen.findByRole("button", { name: "查看并更新" }));
-    const draft = screen.getByRole("textbox", { name: "操作记录草稿" });
-    fireEvent.change(draft, { target: { value: `${(draft as HTMLTextAreaElement).value}\n\n补充说明` } });
-    await userEvent.click(screen.getByRole("button", { name: "更新并完成" }));
-
-    await waitFor(async () => expect(await db.materialLinks.count()).toBe(1));
-    const notes = await db.notes.toArray();
-    expect(notes.filter(note => note.kind === "procedure")).toHaveLength(1);
-    expect(notes.find(note => note.id === existing.id)).toMatchObject({ revision: 2, content: expect.stringContaining("补充说明") });
-    expect(notes.filter(note => note.kind === "material")).toHaveLength(1);
+    expect(await screen.findByRole("textbox", { name: "随手记" })).toHaveValue(content);
+    expect(await db.notes.count()).toBe(0);
   });
+
+  it("retains a pending share and rolls back the note when saving fails", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    await writeLibraryMetadata("share.pending.v1", [{ id: "share", title: "", text: "不能丢的分享", url: "", createdAt: now() }]);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "收到的分享" }));
+    const save = await screen.findByRole("button", { name: "保存记录" });
+    const failure = vi.spyOn(db.metadata, "put").mockRejectedValueOnce(new Error("disk full"));
+    await userEvent.click(save);
+    expect(await screen.findByRole("alert")).toHaveTextContent("分享内容仍然保留");
+    failure.mockRestore();
+    expect(await db.notes.count()).toBe(0);
+    expect((await db.metadata.get("share.pending.v1"))?.value).toHaveLength(1);
+    await userEvent.click(save);
+    await waitFor(async () => expect(await db.notes.count()).toBe(1));
+  });
+
 
   it("shows a deleted source and preserves the relation after restoring it", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
@@ -232,6 +254,7 @@ describe("core note interactions", () => {
     const relations = await screen.findByRole("region", { name: "续写关系" });
     expect(within(relations).getByText("已在回收站")).toBeInTheDocument();
     await userEvent.click(within(relations).getByRole("button", { name: /回收站里的原记录/ }));
+    await userEvent.click(screen.getByText("当时的记录", { selector: "summary" }));
     const timeline = screen.getByRole("region", { name: "当时的记录" });
     expect(within(timeline).getByRole("button", { name: /回收站里的原记录/ })).toHaveAttribute("aria-current", "true");
     expect(screen.queryByRole("button", { name: "继续写" })).not.toBeInTheDocument();
@@ -475,42 +498,24 @@ describe("core note interactions", () => {
     expect(await screen.findByText("server-test")).toBeInTheDocument();
   });
 
-  it("creates a lightweight topic, adds a procedure, and manages its topic-local pin", async () => {
+  it("keeps existing topic links available through settings without organization controls", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
-    const procedure = noteFixture("topic-procedure", "重启 Nginx", now(), { kind: "procedure", content: "systemctl restart nginx" });
-    await saveNote(procedure, false);
+    const note = noteFixture("topic-note", "旧主题里的记录", now());
+    const topic = { id: "topic", syncId: "sync-topic", name: "服务器管理", createdAt: now(), updatedAt: now() };
+    const membership = { id: "membership", syncId: "sync-membership", topicId: topic.id, noteId: note.id, pinned: true, createdAt: now(), updatedAt: now() };
+    await db.notes.put(note); await db.topics.put(topic); await db.topicMemberships.put(membership);
     render(<App />);
-
-    await userEvent.click(await screen.findByRole("button", { name: "主题" }));
-    await userEvent.click(within(screen.getByRole("main")).getByRole("button", { name: "新建主题" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "主题名称" }), "服务器管理");
-    await userEvent.click(screen.getByRole("button", { name: "保存主题" }));
-    expect(await screen.findByRole("heading", { name: "服务器管理" })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "最近" }));
-    await userEvent.click(await screen.findByRole("button", { name: /重启 Nginx/ }));
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "加入主题" }), screen.getByRole("option", { name: "服务器管理" }));
-    await waitFor(async () => expect(await db.topicMemberships.count()).toBe(1));
-
-    const topicNavigation = document.querySelector<HTMLElement>(".topic-nav-section")!;
-    await userEvent.click(within(topicNavigation).getByRole("button", { name: /服务器管理/ }));
-    await userEvent.click(await screen.findByRole("button", { name: "设为常用" }));
-    expect(await screen.findByRole("heading", { name: /常用操作/ })).toBeInTheDocument();
-    expect((await db.topicMemberships.toArray())[0]).toMatchObject({ pinned: true });
-
-    await userEvent.click(screen.getByRole("button", { name: "重命名" }));
-    const name = screen.getByRole("textbox", { name: "主题名称" });
-    await userEvent.clear(name); await userEvent.type(name, "服务器运维");
-    await userEvent.click(screen.getByRole("button", { name: "保存主题" }));
-    expect(await screen.findByRole("heading", { name: "服务器运维" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "移出主题" }));
-    expect(await screen.findByRole("heading", { name: "这个主题还是空的" })).toBeInTheDocument();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    try {
-      await userEvent.click(screen.getByRole("button", { name: "删除主题" }));
-      expect(await screen.findByRole("heading", { name: "主题" })).toBeInTheDocument();
-      expect((await db.topics.toArray())[0].deletedAt).toBeTruthy();
-      expect(await db.notes.get(procedure.id)).toBeTruthy();
-    } finally { confirm.mockRestore(); }
+    await userEvent.click(await screen.findByRole("button", { name: "设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "以往的主题" }));
+    await userEvent.click(await screen.findByRole("button", { name: /服务器管理/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /旧主题里的记录/ }));
+    expect(await screen.findByRole("heading", { name: note.title })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "加入主题" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("以往的归类与来源"));
+    await userEvent.click(screen.getByRole("button", { name: topic.name }));
+    expect(await screen.findByRole("heading", { name: topic.name })).toBeInTheDocument();
+    expect(await db.topicMemberships.get(membership.id)).toEqual(membership);
   });
+
+
 });
