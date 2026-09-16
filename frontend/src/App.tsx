@@ -460,7 +460,7 @@ export function App() {
     }
   }
 
-  if (!authLoaded) return <main className="auth-gate"><p className="muted">正在连接服务器…</p></main>;
+  if (!authLoaded) return null;
   if (!authenticated) return <main className="auth-gate"><form className="auth-gate-card" onSubmit={event => { event.preventDefault(); if (showTokenLogin) void signIn(); else void signInWithPasskey(); }}>
     <header className="auth-gate-header"><span className="auth-gate-brand"><i />拾念</span><p>THOUGHTGLEAN</p><h1>{showTokenLogin || !passkeyConfigured ? "使用密钥登录" : "欢迎回来"}</h1><span className="auth-gate-description">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? "使用设备上的 Passkey 快速登录。" : passkeyEnabled && !passkeyConfigured ? "登录后可在设置中启用 Passkey。" : "输入服务器配置的个人访问密钥。"}</span></header>
     <div className="auth-gate-fields">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? <>
