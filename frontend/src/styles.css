@@ -225,7 +225,7 @@ button { cursor: pointer; }
 .markdown-editor .cm-scroller { overflow: visible; font-family: inherit; line-height: inherit; }
 .markdown-editor .cm-content { min-height: 180px; padding: 0; caret-color: var(--accent); }
 .markdown-editor .cm-line { padding: 0; }
-.markdown-editor .cm-md-blank { font-size: 8px; line-height: 16px; }
+.markdown-editor .cm-md-blank { line-height: 16px; }
 .markdown-editor .cm-md-heading { font-weight: 700; line-height: 1.5; }
 .markdown-editor .cm-md-h1 { font-size: 1.65em; }
 .markdown-editor .cm-md-h2 { font-size: 1.4em; }
