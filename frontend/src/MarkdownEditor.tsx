@@ -2,9 +2,20 @@ import { useImperativeHandle, useLayoutEffect, useRef, type Ref } from "react";
 import { Compartment, EditorState, StateField, Text, Transaction, type Range } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, keymap, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
+import { HighlightStyle, defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { markdownKeymap, markdownLanguage } from "@codemirror/lang-markdown";
 import type { SourceSelection, SourceViewport } from "./MarkdownContent";
+
+const syntaxColors: Record<string, string> = {
+  "#404740": "neutral", "#708": "keyword", "#219": "value", "#164": "string",
+  "#a11": "string", "#e40": "type", "#00f": "name", "#30a": "value",
+  "#085": "string", "#167": "type", "#256": "type", "#00c": "name",
+  "#940": "comment", "#f00": "invalid",
+};
+const sourceHighlightStyle = HighlightStyle.define(defaultHighlightStyle.specs.map(spec => ({
+  ...spec,
+  ...(spec.color && syntaxColors[spec.color] ? { color: `var(--syntax-${syntaxColors[spec.color]}, ${spec.color})` } : {}),
+})));
 
 class LabelWidget extends WidgetType {
   constructor(readonly label: string, readonly className: string) { super(); }
@@ -125,7 +136,7 @@ const livePreview = StateField.define<DecorationSet>({
 });
 
 function previewExtensions(sourceMode: boolean) {
-  return [EditorView.editorAttributes.of({ class: sourceMode ? "is-source" : "is-live-preview" }), sourceMode ? syntaxHighlighting(defaultHighlightStyle) : livePreview];
+  return [EditorView.editorAttributes.of({ class: sourceMode ? "is-source" : "is-live-preview" }), sourceMode ? syntaxHighlighting(sourceHighlightStyle) : livePreview];
 }
 
 function editorViewport(editor: EditorView): SourceViewport | undefined {
