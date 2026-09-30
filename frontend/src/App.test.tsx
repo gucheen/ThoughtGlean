@@ -98,7 +98,7 @@ describe("core note interactions", () => {
     const app = render(<App />);
     fireEvent.change(await screen.findByRole("textbox", { name: "随手记" }), { target: { value: "未写完的路线" } });
     await userEvent.click(screen.getByRole("button", { name: "日常" }));
-    expect(screen.getByText("保存到：游戏")).toBeInTheDocument();
+    expect(screen.getByLabelText("记录归属：游戏")).toBeInTheDocument();
     await waitFor(async () => expect((await db.metadata.get("draft.home.v1"))?.value).toMatchObject({ topicID: topic.id }), { timeout: 2000 });
     app.unmount();
     render(<App />);

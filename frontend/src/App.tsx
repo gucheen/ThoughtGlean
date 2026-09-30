@@ -713,12 +713,23 @@ function QuickCapture({ allNotes, draft, draftStatus, suggestedSource, captureSo
 
   const continuationParent = allNotes.find(note => note.id === continuedFromID);
   return <form className={`capture-card ${/^\s*#\s+\S/.test(draft) ? "has-title-line" : ""}`} onSubmit={event => { event.preventDefault(); capture(); }}>
-      <div className="capture-destination">保存到：{destination}{moveToDaily && <button className="text-button" type="button" onClick={moveToDaily}>改存到日常</button>}</div>
       {continuedFromID && <div className="continuation-chip"><span>续写自：</span>{continuationParent ? <button className="continuation-source" type="button" onClick={() => open(continuationParent.id)}>{continuationParent.title}{continuationParent.deletedAt ? "（已在回收站）" : ""}</button> : <span>原记录暂不可用</span>}<button className="continuation-cancel" type="button" aria-label="取消续写" onClick={clearContinuation}>×</button></div>}
       {captureSource && <div className="source-suggestion accepted"><span>来源：{captureSource}</span><button type="button" onClick={removeSource}>移除</button></div>}
       <textarea ref={captureInput} aria-label="随手记" id="captureInput" value={draft} onChange={event => setDraft(event.target.value)} onPaste={paste} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); capture(); } }} placeholder={continuedFromID ? "继续写…" : "写下想法…"} />
       {suggestedSource && !captureSource && <aside className="source-suggestion"><span>识别到链接，设为这条记录的来源？<small>{suggestedSource}</small></span><div><button type="button" onClick={dismissSource}>忽略</button><button type="button" onClick={acceptSource}>设为来源</button></div></aside>}
-      <footer className="capture-footer"><span className="draft-state"><i className={draftStatus} />{draftStatus === "saving" ? "正在保存草稿…" : draftStatus === "saved" ? "草稿已保存" : "草稿自动保存"}</span><div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary" disabled={captureBusy || !draft.trim()}>{captureBusy ? "保存中…" : "保存"}</button></div></footer>
+      <footer className="capture-footer">
+        <div className="capture-meta">
+          <div className="capture-context">
+            <span className="capture-destination" aria-label={`记录归属：${destination}`} title={`记录归属：${destination}`}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 2.5h9v11l-4.5-3-4.5 3v-11Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" /></svg>
+              <span>{destination}</span>
+            </span>
+            {moveToDaily && <button className="text-button capture-move" type="button" onClick={moveToDaily}>改存到日常</button>}
+          </div>
+          <span className="draft-state"><i className={draftStatus} />{draftStatus === "saving" ? "正在保存草稿…" : draftStatus === "saved" ? "草稿已保存" : "草稿自动保存"}</span>
+        </div>
+        <div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary" disabled={captureBusy || !draft.trim()}>{captureBusy ? "保存中…" : "保存"}</button></div>
+      </footer>
     </form>;
 }
 
