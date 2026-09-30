@@ -1,18 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type RefObject } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, saveTopicMembership, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note, type NoteMaterialLink, type NoteSource, type NoteVerification, type Topic, type TopicMembership } from "./db";
+import { createSpaceNote, createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, saveTopicMembership, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note, type NoteMaterialLink, type NoteSource, type NoteVerification, type Topic, type TopicMembership } from "./db";
 import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, serverInfo, ServerSync, type PasskeyInfo } from "./sync";
 import { clearSharedItems, readSharedItems, type SharedItem } from "./share";
 import { ShareReview, sharedNoteText, type PendingShare } from "./ShareReview";
 import { applyPWAUpdate, pwaUpdateEvent } from "./pwa";
 import { CopyButton, MarkdownContent, copyReadingSelection, readingSelection, readingViewport, restoreReadingViewport, type SourceSelection, type SourceViewport } from "./MarkdownContent";
+import { SpacesView } from "./SpacesView";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 
 type View = "recent" | "starred" | "all" | "topics" | "trash";
 type SearchFilter = "all" | "images" | "conflicts";
 type TimeFilter = "any" | "today" | "week" | "month";
 type Route = { view: View; noteID?: string; topicID?: string };
-type HomeDraft = { content: string; continuedFromID?: string; sourceURL?: string };
+type HomeDraft = { content: string; topicID?: string; continuedFromID?: string; sourceURL?: string };
 type EditDraft = { title: string; content: string };
 type ToastState = { message: string; persistent?: boolean; actions?: Array<{ label: string; run: () => void }> };
 type SyncErrorInfo = { message: string; at: string };
@@ -23,19 +24,19 @@ const lastSyncSuccessKey = "sync.last-success.v1";
 const lastSyncErrorKey = "sync.last-error.v1";
 const captureMaxHeight = 320;
 
-const viewPaths: Record<View, string> = { recent: "/", starred: "/starred", all: "/all", topics: "/topics", trash: "/trash" };
+const viewPaths: Record<View, string> = { recent: "/", starred: "/starred", all: "/all", topics: "/spaces", trash: "/trash" };
 
 function readRoute(pathname = window.location.pathname): Route {
   if (pathname === "/starred") return { view: "starred" };
   if (pathname === "/all") return { view: "all" };
   if (pathname === "/trash") return { view: "trash" };
-  if (pathname === "/topics") return { view: "topics" };
-  const topicNoteMatch = pathname.match(/^\/topics\/([^/]+)\/notes\/([^/]+)\/?$/);
+  if (pathname === "/spaces" || pathname === "/topics") return { view: "topics" };
+  const topicNoteMatch = pathname.match(/^\/(?:spaces|topics)\/([^/]+)\/notes\/([^/]+)\/?$/);
   if (topicNoteMatch) {
     try { return { view: "topics", topicID: decodeURIComponent(topicNoteMatch[1]), noteID: decodeURIComponent(topicNoteMatch[2]) }; }
     catch { return { view: "topics" }; }
   }
-  const topicMatch = pathname.match(/^\/topics\/([^/]+)\/?$/);
+  const topicMatch = pathname.match(/^\/(?:spaces|topics)\/([^/]+)\/?$/);
   if (topicMatch) {
     try { return { view: "topics", topicID: decodeURIComponent(topicMatch[1]) }; }
     catch { return { view: "topics" }; }
@@ -49,7 +50,7 @@ function readRoute(pathname = window.location.pathname): Route {
 }
 
 function routePath(route: Route) {
-  if (route.view === "topics" && route.topicID) return route.noteID ? `/topics/${encodeURIComponent(route.topicID)}/notes/${encodeURIComponent(route.noteID)}` : `/topics/${encodeURIComponent(route.topicID)}`;
+  if (route.view === "topics" && route.topicID) return route.noteID ? `/spaces/${encodeURIComponent(route.topicID)}/notes/${encodeURIComponent(route.noteID)}` : `/spaces/${encodeURIComponent(route.topicID)}`;
   return route.noteID ? `/notes/${encodeURIComponent(route.noteID)}` : viewPaths[route.view];
 }
 
@@ -62,6 +63,7 @@ export function App() {
   const [timeFilter, setTimeFilter] = useState<TimeFilter>("any");
   const [searchSelection, setSearchSelection] = useState(0);
   const [draft, setDraft] = useState("");
+  const [draftTopicID, setDraftTopicID] = useState<string>();
   const [captureBusy, setCaptureBusy] = useState(false);
   const [draftStatus, setDraftStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [suggestedSource, setSuggestedSource] = useState<string>();
@@ -114,7 +116,7 @@ export function App() {
       const savedPendingShares = await readLibraryMetadata<PendingShare[]>(pendingSharesKey);
       const savedSyncSuccess = await readLibraryMetadata<string>(lastSyncSuccessKey);
       const savedSyncError = await readLibraryMetadata<SyncErrorInfo>(lastSyncErrorKey);
-      if (savedDraft) { setDraft(savedDraft.content); setContinuedFromID(savedDraft.continuedFromID); setCaptureSource(savedDraft.sourceURL); }
+      if (savedDraft) { setDraft(savedDraft.content); setDraftTopicID(savedDraft.topicID); setContinuedFromID(savedDraft.continuedFromID); setCaptureSource(savedDraft.sourceURL); }
       if (Array.isArray(savedPendingShares) && savedPendingShares.length) setPendingShares(savedPendingShares);
       if (typeof savedSyncSuccess === "string") setLastSyncSuccess(savedSyncSuccess);
       if (savedSyncError?.message && savedSyncError.at) setLastSyncError(savedSyncError);
@@ -141,12 +143,12 @@ export function App() {
     const version = ++draftSaveVersion.current;
     setDraftStatus("saving");
     const timer = window.setTimeout(async () => {
-      if (draft || continuedFromID || captureSource) await writeLibraryMetadata(homeDraftKey, { content: draft, continuedFromID, sourceURL: captureSource } satisfies HomeDraft);
+      if (draft || continuedFromID || captureSource) await writeLibraryMetadata(homeDraftKey, { content: draft, topicID: draftTopicID, continuedFromID, sourceURL: captureSource } satisfies HomeDraft);
       else await deleteLibraryMetadata(homeDraftKey);
       if (draftSaveVersion.current === version) setDraftStatus("saved");
     }, 250);
     return () => clearTimeout(timer);
-  }, [draft, continuedFromID, captureSource, draftLoaded]);
+  }, [draft, draftTopicID, continuedFromID, captureSource, draftLoaded]);
   useEffect(() => {
     setSearchSelection(0);
   }, [query]);
@@ -223,6 +225,8 @@ export function App() {
   const selectedTopic = topics.find(topic => topic.id === topicID);
   const activeTopicMemberships = allTopicMemberships.filter(membership => !membership.deletedAt && notes.some(note => note.id === membership.noteId && !note.deletedAt));
   const topicMemberships = selectedTopic ? activeTopicMemberships.filter(membership => membership.topicId === selectedTopic.id) : [];
+  const hiddenTopicIDs = new Set(topics.filter(topic => topic.hiddenFromDaily || topic.archivedAt).map(topic => topic.id));
+  const hiddenNoteIDs = new Set(activeTopicMemberships.filter(item => hiddenTopicIDs.has(item.topicId)).map(item => item.noteId));
   const attachmentNamesByNote = new Map<string, string[]>();
   for (const item of allAttachments) attachmentNamesByNote.set(item.noteId, [...(attachmentNamesByNote.get(item.noteId) ?? []), item.originalName, ...(item.altText ? [item.altText] : [])]);
   const terms = searchTerms(query);
@@ -231,6 +235,7 @@ export function App() {
     const kind = note.kind ?? "note";
     if (view === "trash" ? !note.deletedAt : note.deletedAt) return false;
     if (view === "starred" && !note.starred) return false;
+    if (view === "recent" && hiddenNoteIDs.has(note.id)) return false;
     if (kind === "material" && view === "recent" && !terms.length) return false;
     if (searchFilter === "images" && !attachmentNoteIDs.has(note.id)) return false;
     if (searchFilter === "conflicts" && !isConflict(note)) return false;
@@ -241,8 +246,9 @@ export function App() {
     return terms.every(term => haystack.includes(term));
   }).sort((left, right) => terms.length ? searchScore(right, terms, sourceByNote.get(right.id), attachmentNamesByNote.get(right.id)) - searchScore(left, terms, sourceByNote.get(left.id), attachmentNamesByNote.get(left.id)) || right.updatedAt.localeCompare(left.updatedAt) : right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
   const searchHints = new Map(visible.map(note => [note.id, searchMatchHint(terms, sourceByNote.get(note.id), attachmentNamesByNote.get(note.id))]).filter((item): item is [string, string] => Boolean(item[1])));
-  const topicVisible = selectedTopic ? topicMemberships.map(membership => notes.find(note => note.id === membership.noteId && !note.deletedAt)).filter((note): note is Note => Boolean(note)).filter(note => terms.every(term => normalizeForSearch(`${note.title}\n${note.content}`).includes(term))).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)) : [];
-  const keyboardNotes = view === "topics" && selectedTopic ? topicVisible : visible;
+  const membershipByNote = new Map(topicMemberships.map(membership => [membership.noteId, membership]));
+  const topicVisible = selectedTopic ? visible.filter(note => membershipByNote.has(note.id)).sort((left, right) => Number(membershipByNote.get(right.id)?.pinned) - Number(membershipByNote.get(left.id)?.pinned) || right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)) : [];
+  const keyboardNotes = view === "topics" ? topicVisible : visible;
   const keyboardSelectedID = query.trim() && keyboardNotes.length ? keyboardNotes[Math.min(searchSelection, keyboardNotes.length - 1)]?.id : undefined;
   useEffect(() => {
     if (!keyboardSelectedID) return;
@@ -254,8 +260,8 @@ export function App() {
     if (replace) history.replaceState(null, "", path); else if (path !== window.location.pathname) history.pushState(null, "", path);
     setView(route.view); setTopicID(route.topicID); setSelectedID(route.noteID); setEditing(false);
   }
-  function showView(nextView: View, replace = false) { navigate({ view: nextView }, replace); }
-  function showTopic(nextTopicID?: string) { navigate({ view: "topics", topicID: nextTopicID }); }
+  function showView(nextView: View, replace = false) { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); navigate({ view: nextView }, replace); }
+  function showTopic(nextTopicID?: string) { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); navigate({ view: "topics", topicID: nextTopicID }); }
   function showNote(noteID: string) { navigate({ view, topicID: view === "topics" ? topicID : undefined, noteID }); }
 
   async function syncNow() {
@@ -286,9 +292,9 @@ export function App() {
     if (!draft.trim() || captureBusy) return;
     setCaptureBusy(true);
     try {
-      const note = await createNote(draft, continuedFromID);
+      const note = await createSpaceNote(draft, continuedFromID, draftTopicID);
       if (captureSource) await attachSource(note, captureSource);
-      setDraft(""); setContinuedFromID(undefined); await deleteLibraryMetadata(homeDraftKey);
+      setDraft(""); setDraftTopicID(undefined); setContinuedFromID(undefined); await deleteLibraryMetadata(homeDraftKey);
       setSuggestedSource(undefined); setCaptureSource(undefined); setDraftStatus("saved");
       setToast({ message: "记录已保存", actions: [
         { label: "打开", run: () => showNote(note.id) },
@@ -349,7 +355,7 @@ export function App() {
       setToast({ message: `正在处理粘贴的 ${images.length} 张图片…`, persistent: true });
       const prepared = [] as File[];
       for (const file of images) prepared.push(await prepareImage(file));
-      const note = await createNote(draft || "图片记录", continuedFromID); setDraft(""); setContinuedFromID(undefined); showNote(note.id); setEditing(true);
+      const note = await createSpaceNote(draft || "图片记录", continuedFromID, draft ? draftTopicID : selectedTopic?.id); setDraft(""); setDraftTopicID(undefined); setContinuedFromID(undefined); showNote(note.id); setEditing(true);
       for (const file of prepared) {
         const item: Attachment = { id: newID(), syncId: newID(), noteId: note.id, originalName: file.name || "pasted-image.png", mimeType: file.type, byteSize: file.size, createdAt: now(), blob: file };
         await saveAttachment(note.syncId, item);
@@ -392,8 +398,8 @@ export function App() {
   }
   async function saveSharedNote(item: PendingShare) {
     const next = pendingShares.filter(candidate => candidate.id !== item.id);
-    const note = await db.transaction("rw", [db.notes, db.events, db.metadata], async () => {
-      const saved = await createNote(sharedNoteText(item));
+    const note = await db.transaction("rw", [db.notes, db.topics, db.topicMemberships, db.events, db.metadata], async () => {
+      const saved = await createSpaceNote(sharedNoteText(item), undefined, selectedTopic && !selectedTopic.archivedAt ? selectedTopic.id : undefined);
       await writeLibraryMetadata(pendingSharesKey, next);
       return saved;
     });
@@ -404,9 +410,10 @@ export function App() {
     const content = [draft.trim(), sharedNoteText(item)].filter(Boolean).join("\n\n");
     const next = pendingShares.filter(candidate => candidate.id !== item.id);
     await db.transaction("rw", db.metadata, async () => {
-      await writeLibraryMetadata(homeDraftKey, { content, continuedFromID, sourceURL: captureSource } satisfies HomeDraft);
+      await writeLibraryMetadata(homeDraftKey, { content, topicID: draft ? draftTopicID : undefined, continuedFromID, sourceURL: captureSource } satisfies HomeDraft);
       await writeLibraryMetadata(pendingSharesKey, next);
     });
+    if (!draft) setDraftTopicID(undefined);
     setDraft(content); setPendingShares(next); setShareReviewOpen(false);
     setQuery(""); setSearchFilter("all"); setTimeFilter("any"); showView("recent");
     requestAnimationFrame(() => captureInput.current?.focus());
@@ -474,24 +481,33 @@ export function App() {
     <footer className="auth-gate-footer">个人应用 · 数据仅向你的服务器同步</footer>
   </form></main>;
 
+  const captureProps: CaptureProps = {
+    allNotes: notes, draft, draftStatus, suggestedSource, captureSource,
+    acceptSource: () => { setCaptureSource(suggestedSource); setSuggestedSource(undefined); },
+    dismissSource: () => setSuggestedSource(undefined), removeSource: () => setCaptureSource(undefined),
+    continuedFromID, setDraft: value => { if (!draft) setDraftTopicID(selectedTopic?.id); setDraft(value); },
+    clearContinuation: () => setContinuedFromID(undefined), capture: () => void capture(), captureBusy,
+    captureInput, paste: event => void capturePastedImages(event), open: showNote,
+    destination: (draft ? topics.find(topic => topic.id === draftTopicID)?.name : selectedTopic?.name) ?? (draftTopicID && draft ? "不可用的空间" : "日常"),
+    moveToDaily: draft && draftTopicID ? () => { setDraftTopicID(undefined); showView("recent"); } : undefined,
+  };
+
   return <div className={`app-shell ${selected && editing ? "is-detail-editing" : ""}`}>
     <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong></span></button><div className="topbar-main"><label className="search-box"><span className="search-icon" aria-hidden="true" /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
       if (event.key === "ArrowDown" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current + 1) % keyboardNotes.length); }
       else if (event.key === "ArrowUp" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current - 1 + keyboardNotes.length) % keyboardNotes.length); }
       else if (event.key === "Enter" && keyboardSelectedID) { event.preventDefault(); showNote(keyboardSelectedID); }
       else if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); }
-    }} type="search" placeholder="找找以前记过的…" /><kbd>↑↓</kbd><kbd>↵</kbd></label><button className="button button-primary top-new" onClick={() => { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }}><span>＋</span><span className="button-label">新记录</span></button></div></header>
-    <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "最近"], ["starred", "星标"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key && (key !== "topics" || !topicID) ? "active" : ""}`} onClick={() => showView(key)}>{label}</button>)}</nav>{pendingShares.length > 0 && <button className="nav-item share-review-nav" onClick={() => setShareReviewOpen(true)}>收到的分享</button>}<button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}>设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}</span></div></aside>
-      <main className="main-content">{selected ? <Detail key={selected.id} note={selected} notes={notes} source={source} materialLinks={allMaterialLinks} verifications={verificationsByNote.get(selected.id) ?? []} topics={topics} topicMemberships={activeTopicMemberships.filter(item => item.noteId === selected.id)} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => view === "topics" ? showTopic(topicID) : showView(view)} onSelect={showNote} onOpenTopic={showTopic} onContinue={() => { setContinuedFromID(selected.id); setQuery(""); setSearchFilter("all"); setTimeFilter("any"); showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => view === "topics" ? showTopic(topicID) : showView(view, true)} /> : view === "topics" ? <TopicsView topics={topics} selectedTopic={selectedTopic} notes={topicVisible} memberships={activeTopicMemberships} query={query} keyboardSelectedID={keyboardSelectedID} onOpenTopic={showTopic} onOpenNote={showNote} /> : <Library view={view} notes={visible} allNotes={notes} sourceByNote={sourceByNote} query={query} setQuery={setQuery} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} draft={draft} draftStatus={draftStatus} suggestedSource={suggestedSource} captureSource={captureSource} acceptSource={() => { setCaptureSource(suggestedSource); setSuggestedSource(undefined); }} dismissSource={() => setSuggestedSource(undefined)} removeSource={() => setCaptureSource(undefined)} continuedFromID={continuedFromID} setDraft={setDraft} clearContinuation={() => setContinuedFromID(undefined)} capture={() => void capture()} captureBusy={captureBusy} captureInput={captureInput} paste={event => void capturePastedImages(event)} open={showNote} update={update} restore={restore} />}</main></div>
+    }} type="search" placeholder={selectedTopic ? `搜索「${selectedTopic.name}」内的记录…` : view === "topics" ? "查找空间…" : view === "recent" ? "搜索日常记录…" : "找找以前记过的…"} /><kbd>↑↓</kbd><kbd>↵</kbd></label><button className="button button-primary top-new" onClick={() => { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); if (selectedTopic && !selectedTopic.archivedAt) showTopic(selectedTopic.id); else showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }}><span>＋</span><span className="button-label">新记录</span></button></div></header>
+    <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "日常"], ["starred", "星标"], ["all", "全部记录"], ["topics", "空间"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key && (key !== "topics" || !topicID) ? "active" : ""}`} onClick={() => showView(key)}>{label}</button>)}</nav><nav className="topic-nav-section" aria-label="常用空间">{topics.filter(topic => !topic.archivedAt).map(topic => <button key={topic.id} className={`nav-item ${topicID === topic.id ? "active" : ""}`} onClick={() => showTopic(topic.id)}><span>{topic.name}</span></button>)}</nav>{pendingShares.length > 0 && <button className="nav-item share-review-nav" onClick={() => setShareReviewOpen(true)}>收到的分享</button>}<button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}>设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}</span></div></aside>
+      <main className="main-content">{selected ? <Detail key={selected.id} note={selected} notes={notes} source={source} materialLinks={allMaterialLinks} verifications={verificationsByNote.get(selected.id) ?? []} topics={topics} topicMemberships={activeTopicMemberships.filter(item => item.noteId === selected.id)} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => view === "topics" ? showTopic(topicID) : showView(view)} onSelect={showNote} onOpenTopic={showTopic} onContinue={() => { setContinuedFromID(selected.id); if (!draft) setDraftTopicID(selectedTopic?.id); setQuery(""); setSearchFilter("all"); setTimeFilter("any"); if (selectedTopic && !selectedTopic.archivedAt) showTopic(selectedTopic.id); else showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => view === "topics" ? showTopic(topicID) : showView(view, true)} /> : view === "topics" ? <SpacesView key={topicID ?? "overview"} topics={topics} selectedTopic={selectedTopic} requestedTopicID={topicID} notes={topicVisible} allNotes={notes} memberships={activeTopicMemberships} query={query} keyboardSelectedID={keyboardSelectedID} onOpenTopic={showTopic} onOpenNote={showNote} onChange={() => void syncNow()}>{!selectedTopic?.archivedAt && <QuickCapture {...captureProps} />}</SpacesView> : <Library view={view} notes={visible} sourceByNote={sourceByNote} query={query} setQuery={setQuery} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} {...captureProps} update={update} restore={restore} />}</main></div>
     {shareReviewOpen && pendingShares[0] && <ShareReview key={pendingShares[0].id} item={pendingShares[0]} onClose={() => setShareReviewOpen(false)} onDiscard={removePendingShare} onMoveToCapture={moveSharedToCapture} onSave={saveSharedNote} />}
     {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
       <section className="dialog-card settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
         <header><div><p className="eyebrow">ThoughtGlean</p><h2>设置</h2></div><button className="text-button" onClick={() => setSettingsOpen(false)}>关闭</button></header>
         <div className="settings-section">
           <h3>记录</h3>
-          <button className="button button-secondary" onClick={() => { setSettingsOpen(false); setQuery(""); setSearchFilter("all"); setTimeFilter("any"); showView("all"); }}>全部记录</button>
           <button className="button button-secondary" onClick={() => { setSettingsOpen(false); setQuery(""); setSearchFilter("all"); setTimeFilter("any"); showView("trash"); }}>回收站</button>
-          {topics.length > 0 && <button className="button button-secondary" onClick={() => { setSettingsOpen(false); setQuery(""); showTopic(); }}>以往的主题</button>}
         </div>
         <div className="settings-section">
           <h3>备份与导出</h3>
@@ -530,7 +546,7 @@ export function App() {
   </div>;
 }
 
-const viewTitles: Record<View, string> = { recent: "最近", starred: "星标", all: "全部记录", topics: "以往的主题", trash: "回收站" };
+const viewTitles: Record<View, string> = { recent: "日常", starred: "星标", all: "全部记录", topics: "空间", trash: "回收站" };
 function formatDiagnosticTime(value?: string) {
   if (!value) return "尚未同步";
   const date = new Date(value);
@@ -677,15 +693,17 @@ function CommandCopyButton({ command }: { command: string }) {
   return <button className="button button-secondary" type="button" onClick={() => void copy()}>{label}</button>;
 }
 
-function TopicsView({ topics, selectedTopic, notes, memberships, query, keyboardSelectedID, onOpenTopic, onOpenNote }: { topics: Topic[]; selectedTopic?: Topic; notes: Note[]; memberships: TopicMembership[]; query: string; keyboardSelectedID?: string; onOpenTopic: (topicID?: string) => void; onOpenNote: (noteID: string) => void }) {
-  return <section className="topics-view">
-    {selectedTopic && <button className="text-button" onClick={() => onOpenTopic()}>← 以往的主题</button>}
-    <header className="topics-heading"><div><h1>{selectedTopic?.name ?? "以往的主题"}</h1><p>之前归类的记录仍可在这里查看，也可通过搜索找回。</p></div></header>
-    {selectedTopic ? <div className="topic-note-list">{notes.map(note => <article key={note.id} className={`topic-note-card ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id}><button className="topic-note-open" onClick={() => onOpenNote(note.id)}><strong><HighlightedText text={note.title} query={query} /></strong><p><HighlightedText text={excerptForSearch(note.content, query)} query={query} /></p></button></article>)}{!notes.length && <p className="muted">没有匹配的记录。</p>}</div> : <div className="topic-grid">{topics.map(topic => <button key={topic.id} className="topic-card" onClick={() => onOpenTopic(topic.id)}><strong>{topic.name}</strong><small>{memberships.filter(item => item.topicId === topic.id).length} 条记录</small></button>)}</div>}
-  </section>;
-}
+type CaptureProps = {
+  allNotes: Note[]; draft: string; draftStatus: "idle" | "saving" | "saved";
+  suggestedSource?: string; captureSource?: string; acceptSource: () => void;
+  dismissSource: () => void; removeSource: () => void; continuedFromID?: string;
+  setDraft: (value: string) => void; clearContinuation: () => void; capture: () => void;
+  captureBusy: boolean; captureInput: RefObject<HTMLTextAreaElement | null>;
+  paste: (event: ClipboardEvent<HTMLTextAreaElement>) => void; open: (noteID: string) => void;
+  destination: string; moveToDaily?: () => void;
+};
 
-function Library({ view, notes, allNotes, sourceByNote, query, setQuery, searchHints, keyboardSelectedID, searchFilter, setSearchFilter, timeFilter, setTimeFilter, conflictCount, openFirstConflict, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, update, restore }: { view: View; notes: Note[]; allNotes: Note[]; sourceByNote: Map<string, NoteSource>; query: string; setQuery: (value: string) => void; searchHints: Map<string, string>; keyboardSelectedID?: string; searchFilter: SearchFilter; setSearchFilter: (value: SearchFilter) => void; timeFilter: TimeFilter; setTimeFilter: (value: TimeFilter) => void; conflictCount: number; openFirstConflict: () => void; draft: string; draftStatus: "idle" | "saving" | "saved"; suggestedSource?: string; captureSource?: string; acceptSource: () => void; dismissSource: () => void; removeSource: () => void; continuedFromID?: string; setDraft: (value: string) => void; clearContinuation: () => void; capture: () => void; captureBusy: boolean; captureInput: RefObject<HTMLTextAreaElement | null>; paste: (event: ClipboardEvent<HTMLTextAreaElement>) => void; open: (noteID: string) => void; update: (note: Note, patch: Partial<Note>) => Promise<void>; restore: (note: Note) => Promise<void> }) {
+function QuickCapture({ allNotes, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, destination, moveToDaily }: CaptureProps) {
   useLayoutEffect(() => { fitCaptureTextarea(captureInput.current); }, [captureInput, draft]);
   useEffect(() => {
     const resize = () => fitCaptureTextarea(captureInput.current);
@@ -693,26 +711,31 @@ function Library({ view, notes, allNotes, sourceByNote, query, setQuery, searchH
     return () => window.removeEventListener("resize", resize);
   }, [captureInput]);
 
+  const continuationParent = allNotes.find(note => note.id === continuedFromID);
+  return <form className={`capture-card ${/^\s*#\s+\S/.test(draft) ? "has-title-line" : ""}`} onSubmit={event => { event.preventDefault(); capture(); }}>
+      <div className="capture-destination">保存到：{destination}{moveToDaily && <button className="text-button" type="button" onClick={moveToDaily}>改存到日常</button>}</div>
+      {continuedFromID && <div className="continuation-chip"><span>续写自：</span>{continuationParent ? <button className="continuation-source" type="button" onClick={() => open(continuationParent.id)}>{continuationParent.title}{continuationParent.deletedAt ? "（已在回收站）" : ""}</button> : <span>原记录暂不可用</span>}<button className="continuation-cancel" type="button" aria-label="取消续写" onClick={clearContinuation}>×</button></div>}
+      {captureSource && <div className="source-suggestion accepted"><span>来源：{captureSource}</span><button type="button" onClick={removeSource}>移除</button></div>}
+      <textarea ref={captureInput} aria-label="随手记" id="captureInput" value={draft} onChange={event => setDraft(event.target.value)} onPaste={paste} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); capture(); } }} placeholder={continuedFromID ? "继续写…" : "写下想法…"} />
+      {suggestedSource && !captureSource && <aside className="source-suggestion"><span>识别到链接，设为这条记录的来源？<small>{suggestedSource}</small></span><div><button type="button" onClick={dismissSource}>忽略</button><button type="button" onClick={acceptSource}>设为来源</button></div></aside>}
+      <footer className="capture-footer"><span className="draft-state"><i className={draftStatus} />{draftStatus === "saving" ? "正在保存草稿…" : draftStatus === "saved" ? "草稿已保存" : "草稿自动保存"}</span><div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary" disabled={captureBusy || !draft.trim()}>{captureBusy ? "保存中…" : "保存"}</button></div></footer>
+    </form>;
+}
+
+function Library({ view, notes, allNotes, sourceByNote, query, setQuery, searchHints, keyboardSelectedID, searchFilter, setSearchFilter, timeFilter, setTimeFilter, conflictCount, openFirstConflict, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, update, restore, destination, moveToDaily }: { view: View; notes: Note[]; allNotes: Note[]; sourceByNote: Map<string, NoteSource>; query: string; setQuery: (value: string) => void; searchHints: Map<string, string>; keyboardSelectedID?: string; searchFilter: SearchFilter; setSearchFilter: (value: SearchFilter) => void; timeFilter: TimeFilter; setTimeFilter: (value: TimeFilter) => void; conflictCount: number; openFirstConflict: () => void; update: (note: Note, patch: Partial<Note>) => Promise<void>; restore: (note: Note) => Promise<void> } & CaptureProps) {
   const noteByID = new Map(allNotes.map(note => [note.id, note]));
   const continuationCounts = new Map<string, number>();
   for (const note of allNotes) {
     if (note.continuedFromId && !note.deletedAt && !isConflict(note)) continuationCounts.set(note.continuedFromId, (continuationCounts.get(note.continuedFromId) ?? 0) + 1);
   }
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const continuationParent = continuedFromID ? noteByID.get(continuedFromID) : undefined;
   const groups = new Map<string, Note[]>();
   for (const note of notes) {
     const key = localDateKey(note.createdAt);
     groups.set(key, [...(groups.get(key) ?? []), note]);
   }
   return <section className="library-view">
-    {view !== "trash" && <form className={`capture-card ${/^\s*#\s+\S/.test(draft) ? "has-title-line" : ""}`} onSubmit={event => { event.preventDefault(); capture(); }}>
-      {continuedFromID && <div className="continuation-chip"><span>续写自：</span>{continuationParent ? <button className="continuation-source" type="button" onClick={() => open(continuationParent.id)}>{continuationParent.title}{continuationParent.deletedAt ? "（已在回收站）" : ""}</button> : <span>原记录暂不可用</span>}<button className="continuation-cancel" type="button" aria-label="取消续写" onClick={clearContinuation}>×</button></div>}
-      {captureSource && <div className="source-suggestion accepted"><span>来源：{captureSource}</span><button type="button" onClick={removeSource}>移除</button></div>}
-      <textarea ref={captureInput} aria-label="随手记" id="captureInput" value={draft} onChange={event => setDraft(event.target.value)} onPaste={paste} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); capture(); } }} placeholder={continuedFromID ? "继续写…" : "写下想法…"} />
-      {suggestedSource && !captureSource && <aside className="source-suggestion"><span>识别到链接，设为这条记录的来源？<small>{suggestedSource}</small></span><div><button type="button" onClick={dismissSource}>忽略</button><button type="button" onClick={acceptSource}>设为来源</button></div></aside>}
-      <footer className="capture-footer"><span className="draft-state"><i className={draftStatus} />{draftStatus === "saving" ? "正在保存草稿…" : draftStatus === "saved" ? "草稿已保存" : "草稿自动保存"}</span><div className="capture-actions"><span className="shortcut-hint"><kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-primary" disabled={captureBusy || !draft.trim()}>{captureBusy ? "保存中…" : "保存"}</button></div></footer>
-    </form>}
+    {view !== "trash" && <QuickCapture {...{ allNotes, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, destination, moveToDaily }} />}
     <div className="library-controls"><header className="view-heading"><h1>{viewTitles[view]}</h1></header><button className="text-button" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>{searchFilter !== "all" || timeFilter !== "any" ? "筛选中" : "筛选"}</button></div>
     {filtersOpen && <div className="search-filter-rows"><div className="search-filters" aria-label="内容筛选">{([['all', '全部'], ['images', '图片'], ['conflicts', '冲突']] as [SearchFilter, string][]).map(([key, label]) => <button key={key} aria-pressed={searchFilter === key} onClick={() => setSearchFilter(key)}>{label}</button>)}</div><div className="search-filters time-filters" aria-label="时间筛选">{([['any', '不限时间'], ['today', '今天'], ['week', '最近一周'], ['month', '最近一月']] as [TimeFilter, string][]).map(([key, label]) => <button key={key} aria-pressed={timeFilter === key} onClick={() => setTimeFilter(key)}>{label}</button>)}</div></div>}
     {conflictCount > 0 && searchFilter !== "conflicts" && view !== "trash" && <aside className="conflict-notice"><span><strong>{conflictCount} 条同步冲突待处理</strong><small>原版本和另一设备版本均已保留。</small></span><button className="button button-secondary" onClick={openFirstConflict}>查看</button></aside>}
@@ -937,8 +960,8 @@ function NoteContext({ note, notes, materialLinks, topics, topicMemberships, onS
   const joinedTopics = topics.filter(topic => membershipByTopic.has(topic.id));
 
   return <aside className="context-rail">
-    {(joinedTopics.length > 0 || sourceMaterials.length > 0 || derivedNotes.length > 0) && <details className="legacy-details"><summary>以往的归类与来源</summary>
-      {joinedTopics.length > 0 && <section className="context-section"><h2>所属主题</h2>{joinedTopics.map(topic => <button key={topic.id} className="text-button" onClick={() => onOpenTopic(topic.id)}>{topic.name}</button>)}</section>}
+    {joinedTopics.length > 0 && <section className="context-section"><h2>所属空间</h2>{joinedTopics.map(topic => <button key={topic.id} className="text-button" onClick={() => onOpenTopic(topic.id)}>{topic.name}{topic.archivedAt ? "（已归档）" : ""}</button>)}</section>}
+    {(sourceMaterials.length > 0 || derivedNotes.length > 0) && <details className="legacy-details"><summary>以往的归类与来源</summary>
       {sourceMaterials.length > 0 && <section className="context-section"><h2>提炼自</h2>{sourceMaterials.map(item => <button className="related-note" key={item.id} onClick={() => onSelect(item.id)}>{item.title}{item.deletedAt && "（已在回收站）"}</button>)}</section>}
       {derivedNotes.length > 0 && <section className="context-section"><h2>相关记录</h2>{derivedNotes.map(item => <button className="related-note" key={item.id} onClick={() => onSelect(item.id)}>{item.title}</button>)}</section>}
     </details>}

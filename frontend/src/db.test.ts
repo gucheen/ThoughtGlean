@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createNote, createTopic, db, exportBackup, newID, now, readLibraryMetadata, recordVerification, restoreBackup, saveAttachment, saveTopicMembership, writeLibraryMetadata, type Attachment } from "./db";
+import { addNotesToSpace, createSpaceNote, createNote, createTopic, db, exportBackup, newID, now, readLibraryMetadata, recordVerification, restoreBackup, saveAttachment, saveTopic, saveTopicMembership, writeLibraryMetadata, type Attachment } from "./db";
 
 beforeEach(async () => {
   await db.open();
@@ -9,6 +9,36 @@ beforeEach(async () => {
 });
 
 describe("local persistence", () => {
+  it("saves space capture and membership together and rejects unavailable spaces without a partial note", async () => {
+    const topic = await createTopic("游戏");
+    const note = await createSpaceNote("通关心得", undefined, topic.id);
+    expect(await db.topicMemberships.where("noteId").equals(note.id).first()).toMatchObject({ topicId: topic.id });
+    await saveTopic({ ...topic, archivedAt: now(), hiddenFromDaily: true });
+    const eventCount = await db.events.count();
+    await expect(createSpaceNote("不可保存", undefined, topic.id)).rejects.toThrow("空间不可用");
+    expect(await db.notes.count()).toBe(1);
+    expect(await db.events.count()).toBe(eventCount);
+
+    await saveTopicMembership(topic, note, { pinned: true });
+    const backup = await exportBackup();
+    await restoreBackup(backup);
+    expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: true, archivedAt: expect.any(String) });
+    expect(await db.topicMemberships.where("noteId").equals(note.id).first()).toMatchObject({ pinned: true });
+  });
+
+  it("adds existing records atomically and preserves pinning when selected again", async () => {
+    const topic = await createTopic("游戏");
+    const first = await createNote("配装");
+    const second = await createNote("地图");
+    await expect(addNotesToSpace(topic.id, [first.id, "missing"])).rejects.toThrow("记录已不可用");
+    expect(await db.topicMemberships.count()).toBe(0);
+    await addNotesToSpace(topic.id, [first.id, second.id, first.id]);
+    await saveTopicMembership(topic, first, { pinned: true });
+    await addNotesToSpace(topic.id, [first.id]);
+    expect(await db.topicMemberships.count()).toBe(2);
+    expect(await db.topicMemberships.where("noteId").equals(first.id).first()).toMatchObject({ pinned: true });
+  });
+
   it("saves a quick note and its sync event atomically", async () => {
     const note = await createNote("# 标题\n\n正文");
     expect(await db.notes.get(note.id)).toMatchObject({ title: "标题", content: "正文" });

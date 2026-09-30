@@ -124,12 +124,14 @@ type NoteVerification struct {
 }
 
 type Topic struct {
-	ID        string  `json:"id"`
-	SyncID    string  `json:"syncId"`
-	Name      string  `json:"name"`
-	CreatedAt string  `json:"createdAt"`
-	UpdatedAt string  `json:"updatedAt"`
-	DeletedAt *string `json:"deletedAt,omitempty"`
+	HiddenFromDaily bool    `json:"hiddenFromDaily,omitempty"`
+	ArchivedAt      *string `json:"archivedAt,omitempty"`
+	ID              string  `json:"id"`
+	SyncID          string  `json:"syncId"`
+	Name            string  `json:"name"`
+	CreatedAt       string  `json:"createdAt"`
+	UpdatedAt       string  `json:"updatedAt"`
+	DeletedAt       *string `json:"deletedAt,omitempty"`
 }
 
 type TopicMembership struct {
@@ -640,15 +642,20 @@ func (s *Store) ApplyRemoteTopic(ctx context.Context, incoming Topic) (Topic, er
 			return Topic{}, invalidInput("invalid topic deletion time")
 		}
 	}
+	if incoming.ArchivedAt != nil {
+		if _, err := time.Parse(time.RFC3339Nano, *incoming.ArchivedAt); err != nil {
+			return Topic{}, invalidInput("invalid space archive time")
+		}
+	}
 	var existing Topic
-	err = s.db.QueryRowContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at FROM topics WHERE sync_id = ?`, incoming.SyncID).
-		Scan(&existing.ID, &existing.SyncID, &existing.Name, &existing.CreatedAt, &existing.UpdatedAt, &existing.DeletedAt)
+	err = s.db.QueryRowContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at, hidden_from_daily, archived_at FROM topics WHERE sync_id = ?`, incoming.SyncID).
+		Scan(&existing.ID, &existing.SyncID, &existing.Name, &existing.CreatedAt, &existing.UpdatedAt, &existing.DeletedAt, &existing.HiddenFromDaily, &existing.ArchivedAt)
 	if err == nil {
 		existingUpdated, parseErr := time.Parse(time.RFC3339Nano, existing.UpdatedAt)
 		if parseErr == nil && incomingUpdated.Before(existingUpdated) {
 			return existing, nil
 		}
-		_, err = s.db.ExecContext(ctx, `UPDATE topics SET name = ?, updated_at = ?, deleted_at = ? WHERE id = ?`, incoming.Name, incoming.UpdatedAt, incoming.DeletedAt, existing.ID)
+		_, err = s.db.ExecContext(ctx, `UPDATE topics SET name = ?, updated_at = ?, deleted_at = ?, hidden_from_daily = ?, archived_at = ? WHERE id = ?`, incoming.Name, incoming.UpdatedAt, incoming.DeletedAt, incoming.HiddenFromDaily, incoming.ArchivedAt, existing.ID)
 		incoming.ID = existing.ID
 		return incoming, err
 	}
@@ -659,7 +666,7 @@ func (s *Store) ApplyRemoteTopic(ctx context.Context, incoming Topic) (Topic, er
 	if err != nil {
 		return Topic{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`, incoming.ID, incoming.SyncID, incoming.Name, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at, hidden_from_daily, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, incoming.ID, incoming.SyncID, incoming.Name, incoming.CreatedAt, incoming.UpdatedAt, incoming.DeletedAt, incoming.HiddenFromDaily, incoming.ArchivedAt)
 	return incoming, err
 }
 
@@ -684,19 +691,16 @@ func (s *Store) ApplyRemoteTopicMembership(ctx context.Context, incoming TopicMe
 		return TopicMembership{}, err
 	}
 	defer tx.Rollback()
-	var topicID, noteID, noteKind string
+	var topicID, noteID string
 	var topicDeletedAt, noteDeletedAt *string
 	if err := tx.QueryRowContext(ctx, `SELECT id, deleted_at FROM topics WHERE sync_id = ?`, topicSyncID).Scan(&topicID, &topicDeletedAt); err != nil {
 		return TopicMembership{}, invalidInput("topic does not exist")
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT id, kind, deleted_at FROM notes WHERE sync_id = ?`, noteSyncID).Scan(&noteID, &noteKind, &noteDeletedAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id, deleted_at FROM notes WHERE sync_id = ?`, noteSyncID).Scan(&noteID, &noteDeletedAt); err != nil {
 		return TopicMembership{}, invalidInput("topic record does not exist")
 	}
 	if incoming.DeletedAt == nil && (topicDeletedAt != nil || noteDeletedAt != nil) {
 		return TopicMembership{}, invalidInput("topic or record is deleted")
-	}
-	if incoming.DeletedAt == nil && incoming.Pinned && noteKind != "procedure" {
-		return TopicMembership{}, invalidInput("only procedure notes can be pinned in a topic")
 	}
 	var existing TopicMembership
 	err = tx.QueryRowContext(ctx, `SELECT id, sync_id, topic_id, note_id, pinned, created_at, updated_at, deleted_at FROM topic_memberships WHERE sync_id = ? OR (topic_id = ? AND note_id = ?) ORDER BY CASE WHEN sync_id = ? THEN 0 ELSE 1 END LIMIT 1`, incoming.SyncID, topicID, noteID, incoming.SyncID).
@@ -1282,6 +1286,11 @@ func validateBackupStructure(backup Backup) error {
 				return fmt.Errorf("backup has an invalid topic deletion time %s", topic.ID)
 			}
 		}
+		if topic.ArchivedAt != nil {
+			if _, err := time.Parse(time.RFC3339Nano, *topic.ArchivedAt); err != nil {
+				return fmt.Errorf("backup has an invalid space archive time %s", topic.ID)
+			}
+		}
 		if _, exists := topics[topic.ID]; exists {
 			return fmt.Errorf("backup has duplicate topic id %s", topic.ID)
 		}
@@ -1293,10 +1302,10 @@ func validateBackupStructure(backup Backup) error {
 	membershipSyncIDs := make(map[string]struct{}, len(backup.TopicMemberships))
 	membershipPairs := make(map[string]struct{}, len(backup.TopicMemberships))
 	for _, membership := range backup.TopicMemberships {
-		note, noteExists := notes[membership.NoteID]
+		_, noteExists := notes[membership.NoteID]
 		_, topicExists := topics[membership.TopicID]
 		pair := membership.TopicID + "\x00" + membership.NoteID
-		if membership.ID == "" || membership.SyncID == "" || !topicExists || !noteExists || (membership.DeletedAt == nil && membership.Pinned && normalizedNoteKind(note.Kind) != "procedure") {
+		if membership.ID == "" || membership.SyncID == "" || !topicExists || !noteExists {
 			return fmt.Errorf("backup has an invalid topic membership %s", membership.ID)
 		}
 		if _, err := time.Parse(time.RFC3339Nano, membership.CreatedAt); err != nil {
@@ -1434,7 +1443,7 @@ func (s *Store) RestoreBackup(ctx context.Context, backup Backup) error {
 		}
 	}
 	for _, topic := range backup.Topics {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`, topic.ID, topic.SyncID, topic.Name, topic.CreatedAt, topic.UpdatedAt, topic.DeletedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO topics (id, sync_id, name, created_at, updated_at, deleted_at, hidden_from_daily, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, topic.ID, topic.SyncID, topic.Name, topic.CreatedAt, topic.UpdatedAt, topic.DeletedAt, topic.HiddenFromDaily, topic.ArchivedAt); err != nil {
 			return err
 		}
 	}
@@ -1553,7 +1562,7 @@ func allVerifications(ctx context.Context, q queryer) ([]NoteVerification, error
 }
 
 func allTopics(ctx context.Context, q queryer) ([]Topic, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at FROM topics ORDER BY created_at ASC, id ASC`)
+	rows, err := q.QueryContext(ctx, `SELECT id, sync_id, name, created_at, updated_at, deleted_at, hidden_from_daily, archived_at FROM topics ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1561,7 +1570,7 @@ func allTopics(ctx context.Context, q queryer) ([]Topic, error) {
 	topics := make([]Topic, 0)
 	for rows.Next() {
 		var topic Topic
-		if err := rows.Scan(&topic.ID, &topic.SyncID, &topic.Name, &topic.CreatedAt, &topic.UpdatedAt, &topic.DeletedAt); err != nil {
+		if err := rows.Scan(&topic.ID, &topic.SyncID, &topic.Name, &topic.CreatedAt, &topic.UpdatedAt, &topic.DeletedAt, &topic.HiddenFromDaily, &topic.ArchivedAt); err != nil {
 			return nil, err
 		}
 		topics = append(topics, topic)
@@ -1683,7 +1692,7 @@ func (s *Store) MarkdownExport(ctx context.Context) ([]byte, error) {
 		fmt.Fprintf(&out, "<!-- thoughtglean:id=%s revision=%d createdAt=%s updatedAt=%s -->\n\n", note.ID, note.Revision, note.CreatedAt, note.UpdatedAt)
 		if topicNames := topicNamesByNote[note.ID]; len(topicNames) > 0 {
 			slices.Sort(topicNames)
-			fmt.Fprintf(&out, "主题：%s\n\n", strings.Join(topicNames, "、"))
+			fmt.Fprintf(&out, "空间：%s\n\n", strings.Join(topicNames, "、"))
 		}
 		if note.Kind == "procedure" {
 			status := "未实际验证"
@@ -1784,13 +1793,6 @@ func (s *Store) UpdateNote(ctx context.Context, id string, in UpdateNoteInput) (
 			}
 			if sourceCount > 0 {
 				return Note{}, invalidInput("only procedure notes can reference source material")
-			}
-			var pinnedCount int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM topic_memberships WHERE note_id = ? AND pinned = 1 AND deleted_at IS NULL`, current.ID).Scan(&pinnedCount); err != nil {
-				return Note{}, err
-			}
-			if pinnedCount > 0 {
-				return Note{}, invalidInput("a topic-pinned procedure cannot change kind")
 			}
 		}
 		if current.Kind == "material" && kind != "material" {
@@ -2060,6 +2062,21 @@ func migrate(db *sql.DB) error {
 	var schemaVersion int
 	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil {
 		return err
+	}
+
+	for _, column := range []struct{ name, definition string }{
+		{"hidden_from_daily", "INTEGER NOT NULL DEFAULT 0 CHECK (hidden_from_daily IN (0, 1))"},
+		{"archived_at", "TEXT"},
+	} {
+		var count int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('topics') WHERE name = ?`, column.name).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := tx.Exec("ALTER TABLE topics ADD COLUMN " + column.name + " " + column.definition); err != nil {
+				return err
+			}
+		}
 	}
 
 	rows, err := tx.Query(`PRAGMA table_info(notes)`)

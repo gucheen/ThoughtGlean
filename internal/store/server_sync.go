@@ -78,13 +78,6 @@ func (s *Store) ApplyRemoteNoteWithRelations(ctx context.Context, incoming Note,
 			if sourceCount > 0 {
 				return Note{}, invalidInput("only procedure notes can reference source material")
 			}
-			var pinnedCount int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM topic_memberships WHERE note_id = ? AND pinned = 1 AND deleted_at IS NULL`, localID).Scan(&pinnedCount); err != nil {
-				return Note{}, err
-			}
-			if pinnedCount > 0 {
-				return Note{}, invalidInput("a topic-pinned procedure cannot change kind")
-			}
 		}
 		if !syncedNoteDiffers(incoming, local) {
 			return local, tx.Commit()

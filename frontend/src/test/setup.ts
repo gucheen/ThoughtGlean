@@ -14,3 +14,6 @@ Object.defineProperty(Range.prototype, "getBoundingClientRect", { configurable: 
 Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
 Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:test") });
 Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+
+Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });

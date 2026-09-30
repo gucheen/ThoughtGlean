@@ -506,15 +506,26 @@ func TestTopicsAndTopicPinningSurviveBackup(t *testing.T) {
 	if err != nil || membership.TopicID != topic.ID || membership.NoteID != procedure.ID || !membership.Pinned {
 		t.Fatalf("membership=%#v err=%v", membership, err)
 	}
-	if _, err := noteStore.ApplyRemoteTopicMembership(ctx, TopicMembership{SyncID: "membership-sync-ordinary-01", Pinned: true, CreatedAt: "2026-09-03T03:02:00Z", UpdatedAt: "2026-09-03T03:02:00Z"}, topic.SyncID, ordinary.SyncID); err == nil {
-		t.Fatal("ordinary note was pinned as a common operation")
+	if _, err := noteStore.ApplyRemoteTopicMembership(ctx, TopicMembership{SyncID: "membership-sync-ordinary-01", Pinned: true, CreatedAt: "2026-09-03T03:02:00Z", UpdatedAt: "2026-09-03T03:02:00Z"}, topic.SyncID, ordinary.SyncID); err != nil {
+		t.Fatal(err)
+	}
+	ordinary.Content = "更新后的游戏记录"
+	ordinary.Revision++
+	ordinary.UpdatedAt = "2026-09-30T00:00:00Z"
+	if _, err := noteStore.ApplyRemoteNote(ctx, ordinary); err != nil {
+		t.Fatalf("syncing a pinned ordinary record: %v", err)
+	}
+	archiveTime := "2026-09-30T01:00:00Z"
+	topic.HiddenFromDaily, topic.ArchivedAt, topic.UpdatedAt = true, &archiveTime, archiveTime
+	if _, err := noteStore.ApplyRemoteTopic(ctx, topic); err != nil {
+		t.Fatal(err)
 	}
 
 	backup, err := noteStore.BackupData(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(backup.Topics) != 1 || len(backup.TopicMemberships) != 1 {
+	if len(backup.Topics) != 1 || len(backup.TopicMemberships) != 2 {
 		t.Fatalf("backup topics=%#v memberships=%#v", backup.Topics, backup.TopicMemberships)
 	}
 	target := testStore(t)
@@ -523,12 +534,46 @@ func TestTopicsAndTopicPinningSurviveBackup(t *testing.T) {
 	}
 	topics, _ := target.ListTopics(ctx)
 	memberships, _ := target.ListTopicMemberships(ctx)
-	if len(topics) != 1 || topics[0].Name != "服务器管理" || len(memberships) != 1 || !memberships[0].Pinned {
+	if len(topics) != 1 || topics[0].Name != "服务器管理" || len(memberships) != 2 || !memberships[0].Pinned {
 		t.Fatalf("restored topics=%#v memberships=%#v", topics, memberships)
 	}
+	if !topics[0].HiddenFromDaily || topics[0].ArchivedAt == nil || *topics[0].ArchivedAt != archiveTime {
+		t.Fatalf("space state was not restored: %#v", topics[0])
+	}
+	topic.ArchivedAt, topic.HiddenFromDaily, topic.UpdatedAt = nil, false, "2026-09-30T02:00:00Z"
+	if _, err := target.ApplyRemoteTopic(ctx, topic); err != nil {
+		t.Fatal(err)
+	}
+	topics, _ = target.ListTopics(ctx)
+	if topics[0].ArchivedAt != nil || topics[0].HiddenFromDaily {
+		t.Fatalf("space state was not cleared: %#v", topics[0])
+	}
 	data, err := target.MarkdownExport(ctx)
-	if err != nil || !strings.Contains(string(data), "主题：服务器管理") {
+	if err != nil || !strings.Contains(string(data), "空间：服务器管理") {
 		t.Fatalf("markdown=%s err=%v", data, err)
+	}
+}
+
+func TestSpaceMigrationPreservesExistingTopics(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	topic, err := s.ApplyRemoteTopic(ctx, Topic{SyncID: "legacy-topic-sync-1234", Name: "旧主题", CreatedAt: "2026-09-01T00:00:00Z", UpdatedAt: "2026-09-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"hidden_from_daily", "archived_at"} {
+		if _, err := s.db.Exec("ALTER TABLE topics DROP COLUMN " + column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := migrate(s.db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	topics, err := s.ListTopics(ctx)
+	if err != nil || len(topics) != 1 || topics[0].ID != topic.ID || topics[0].HiddenFromDaily || topics[0].ArchivedAt != nil {
+		t.Fatalf("migrated topics=%#v err=%v", topics, err)
 	}
 }
 

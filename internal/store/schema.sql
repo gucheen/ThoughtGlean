@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS topics (
     id TEXT PRIMARY KEY,
     sync_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    hidden_from_daily INTEGER NOT NULL DEFAULT 0 CHECK (hidden_from_daily IN (0, 1)),
+    archived_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT

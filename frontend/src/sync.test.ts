@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createNote, createTopic, db, newID, now, recordVerification, saveAttachment, saveTopicMembership, type Attachment } from "./db";
+import { createNote, createTopic, db, newID, now, recordVerification, saveAttachment, saveTopic, saveTopicMembership, type Attachment, type Topic } from "./db";
 import { ServerSync } from "./sync";
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
@@ -15,6 +15,27 @@ beforeEach(async () => {
 });
 
 describe("server sync", () => {
+  it("preserves space and membership edits made while an older server snapshot is in flight", async () => {
+    const note = await createNote("游戏攻略");
+    const topic = await createTopic("游戏");
+    const membership = await saveTopicMembership(topic, note);
+    await db.events.clear();
+    let created: Topic | undefined;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await saveTopic({ ...topic, hiddenFromDaily: true, archivedAt: now() });
+      await saveTopicMembership(topic, note, { pinned: true });
+      created = await createTopic("新的游戏");
+      await saveTopicMembership(created, note);
+      return json({ generatedAt: now(), notes: [note], sources: [], topics: [topic], topicMemberships: [membership], attachments: [] });
+    }));
+    await new ServerSync().sync();
+    expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: true, archivedAt: expect.any(String) });
+    expect(await db.topics.get(created!.id)).toBeDefined();
+    expect(await db.topicMemberships.get(membership.id)).toMatchObject({ pinned: true });
+    expect(await db.topicMemberships.count()).toBe(2);
+    expect(await db.events.count()).toBe(4);
+  });
+
   it("uploads a queued image and clears its event after the server accepts it", async () => {
     class TestFormData {
       private values = new Map<string, FormDataEntryValue>();

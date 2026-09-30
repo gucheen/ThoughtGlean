@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { EditorView } from "@codemirror/view";
 import { App } from "./App";
-import { db, now, saveNote, writeLibraryMetadata, type Note } from "./db";
+import { createTopic, db, now, saveNote, saveTopic, saveTopicMembership, writeLibraryMetadata, type Note } from "./db";
 
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
 
@@ -29,6 +29,104 @@ beforeEach(async () => {
 });
 
 describe("core note interactions", () => {
+  it("creates a space, captures within it, and searches only its records", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    await db.notes.put(noteFixture("outside", "外面的攻略", now()));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "空间" }));
+    await userEvent.type(screen.getByLabelText("新空间名称"), "塞尔达");
+    await userEvent.click(screen.getByRole("button", { name: "创建空间" }));
+    expect(await screen.findByRole("heading", { name: "塞尔达" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "随手记" }), { target: { value: "神庙路线" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("button", { name: /神庙路线/ })).toBeInTheDocument();
+    const topic = (await db.topics.toArray())[0];
+    const note = (await db.notes.toArray()).find(item => item.title === "神庙路线")!;
+    expect(await db.topicMemberships.where("noteId").equals(note.id).first()).toMatchObject({ topicId: topic.id });
+    expect(window.location.pathname).toBe(`/spaces/${topic.id}`);
+    await userEvent.click(screen.getByRole("button", { name: "置顶" }));
+    expect(await screen.findByRole("region", { name: "置顶" })).toHaveTextContent("神庙路线");
+    await userEvent.type(screen.getByRole("searchbox"), "外面的攻略");
+    expect(screen.queryByRole("button", { name: /外面的攻略/ })).not.toBeInTheDocument();
+    expect(screen.getByText("没有匹配的记录")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "全部记录" }));
+    await userEvent.type(screen.getByRole("searchbox"), "外面的攻略");
+    expect(screen.getByText("外面的攻略", { selector: ".note-row-title mark" })).toBeInTheDocument();
+  });
+
+  it("bulk joins records and keeps hidden or archived contents available globally", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const topic = await createTopic("游戏资料");
+    const first = noteFixture("game1", "配装备忘", now());
+    const second = noteFixture("game2", "地图备忘", now());
+    await db.notes.bulkPut([first, second]);
+    history.replaceState(null, "", `/spaces/${topic.id}`);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "加入已有记录" }));
+    const dialog = screen.getByRole("dialog", { name: "加入已有记录" });
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: /配装备忘/ }));
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: /地图备忘/ }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "加入空间" }));
+    await waitFor(() => expect(dialog).not.toHaveAttribute("open"));
+    expect(await db.topicMemberships.count()).toBe(2);
+    await userEvent.click(screen.getByRole("checkbox", { name: "从日常收起内容" }));
+    await waitFor(async () => expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: true }));
+    await userEvent.click(screen.getByRole("button", { name: "日常" }));
+    expect(screen.queryByText(first.title, { selector: ".note-row-title" })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByRole("searchbox"), first.title);
+    expect(screen.queryByText(first.title, { selector: ".note-row-title mark" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "全部记录" }));
+    expect(await screen.findByText(first.title, { selector: ".note-row-title" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: topic.name }));
+    await userEvent.click(screen.getByRole("button", { name: "归档空间" }));
+    expect(await screen.findByRole("button", { name: "恢复空间" })).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: "常用空间" })).queryByRole("button", { name: topic.name })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "随手记" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "恢复空间" }));
+    expect(await screen.findByRole("textbox", { name: "随手记" })).toBeInTheDocument();
+    expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: true });
+    await userEvent.click(screen.getByRole("checkbox", { name: "从日常收起内容" }));
+    await waitFor(async () => expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: false }));
+    await userEvent.click(screen.getByRole("button", { name: "日常" }));
+    expect(await screen.findByText(first.title, { selector: ".note-row-title" })).toBeInTheDocument();
+  });
+
+  it("preserves a draft's space across navigation and reload", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const topic = await createTopic("游戏");
+    history.replaceState(null, "", `/spaces/${topic.id}`);
+    const app = render(<App />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "随手记" }), { target: { value: "未写完的路线" } });
+    await userEvent.click(screen.getByRole("button", { name: "日常" }));
+    expect(screen.getByText("保存到：游戏")).toBeInTheDocument();
+    await waitFor(async () => expect((await db.metadata.get("draft.home.v1"))?.value).toMatchObject({ topicID: topic.id }), { timeout: 2000 });
+    app.unmount();
+    render(<App />);
+    expect(await screen.findByRole("textbox", { name: "随手记" })).toHaveValue("未写完的路线");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(async () => expect(await db.notes.count()).toBe(1));
+    expect((await db.topicMemberships.toArray())[0]).toMatchObject({ topicId: topic.id });
+  });
+
+  it("does not open an unrelated search result from the space overview and preserves legacy URLs", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    const topic = await createTopic("旧空间");
+    const note = noteFixture("legacy-space-note", "旧记录", now());
+    await db.notes.put(note); await saveTopicMembership(topic, note);
+    await saveTopic({ ...topic, archivedAt: now() });
+    history.replaceState(null, "", `/topics/${topic.id}`);
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: topic.name })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(`/spaces/${topic.id}`);
+    await userEvent.click(screen.getByRole("button", { name: "← 所有空间" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: topic.name } });
+    fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+    expect(window.location.pathname).toBe("/spaces");
+    await userEvent.click(screen.getByText("已归档空间", { selector: "summary" }));
+    await userEvent.click(screen.getByRole("button", { name: /旧空间/ }));
+    expect(await screen.findByRole("button", { name: /旧记录/ })).toBeInTheDocument();
+  });
+
   it("separates direct continuations from temporal neighbors and navigates in both directions", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
     const root = noteFixture("root", "最初的想法", "2026-01-01T00:00:00Z");
@@ -148,7 +246,6 @@ describe("core note interactions", () => {
     expect(screen.queryByText(material.title)).not.toBeInTheDocument();
     await userEvent.type(search, "旧对话");
     expect(await screen.findByRole("button", { name: /旧对话素材/ })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "设置" }));
     await userEvent.click(screen.getByRole("button", { name: "全部记录" }));
     expect(await screen.findByText(material.title)).toBeInTheDocument();
     expect(search).toHaveValue("");
@@ -498,21 +595,18 @@ describe("core note interactions", () => {
     expect(await screen.findByText("server-test")).toBeInTheDocument();
   });
 
-  it("keeps existing topic links available through settings without organization controls", async () => {
+  it("keeps existing topic identities and links available as spaces", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
     const note = noteFixture("topic-note", "旧主题里的记录", now());
     const topic = { id: "topic", syncId: "sync-topic", name: "服务器管理", createdAt: now(), updatedAt: now() };
     const membership = { id: "membership", syncId: "sync-membership", topicId: topic.id, noteId: note.id, pinned: true, createdAt: now(), updatedAt: now() };
     await db.notes.put(note); await db.topics.put(topic); await db.topicMemberships.put(membership);
     render(<App />);
-    await userEvent.click(await screen.findByRole("button", { name: "设置" }));
-    await userEvent.click(screen.getByRole("button", { name: "以往的主题" }));
-    await userEvent.click(await screen.findByRole("button", { name: /服务器管理/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "服务器管理" }));
     await userEvent.click(await screen.findByRole("button", { name: /旧主题里的记录/ }));
     expect(await screen.findByRole("heading", { name: note.title })).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "加入主题" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByText("以往的归类与来源"));
-    await userEvent.click(screen.getByRole("button", { name: topic.name }));
+    await userEvent.click(screen.getAllByRole("button", { name: topic.name }).at(-1)!);
     expect(await screen.findByRole("heading", { name: topic.name })).toBeInTheDocument();
     expect(await db.topicMemberships.get(membership.id)).toEqual(membership);
   });

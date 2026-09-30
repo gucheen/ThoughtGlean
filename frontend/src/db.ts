@@ -20,7 +20,7 @@ export type Note = {
 export type NoteSource = { noteId: string; url: string; title: string; updatedAt: string };
 
 export type NoteMaterialLink = { id: string; syncId: string; noteId: string; materialId: string; createdAt: string };
-export type Topic = { id: string; syncId: string; name: string; createdAt: string; updatedAt: string; deletedAt?: string };
+export type Topic = { id: string; syncId: string; name: string; hiddenFromDaily?: boolean; archivedAt?: string; createdAt: string; updatedAt: string; deletedAt?: string };
 export type TopicMembership = { id: string; syncId: string; topicId: string; noteId: string; pinned: boolean; createdAt: string; updatedAt: string; deletedAt?: string };
 export type VerificationResult = "success" | "partial" | "failed";
 export type NoteVerification = {
@@ -272,9 +272,9 @@ export async function recordVerification(note: Note, input: { environment: strin
 
 export async function createTopic(name: string) {
   const value = name.trim();
-  if (!value || value.length > 80) throw new Error("主题名称应为 1–80 个字符");
+  if (!value || value.length > 80) throw new Error("空间名称应为 1–80 个字符");
   const duplicate = await db.topics.filter(topic => !topic.deletedAt && topic.name.toLocaleLowerCase() === value.toLocaleLowerCase()).first();
-  if (duplicate) throw new Error("已经存在同名主题");
+  if (duplicate) throw new Error("已经存在同名空间");
   const timestamp = now();
   const topic: Topic = { id: newID(), syncId: newID(), name: value, createdAt: timestamp, updatedAt: timestamp };
   await saveTopic(topic);
@@ -283,7 +283,7 @@ export async function createTopic(name: string) {
 
 export async function saveTopic(topic: Topic, shouldQueue = true) {
   const name = topic.name.trim();
-  if ((!topic.deletedAt && !name) || name.length > 80) throw new Error("主题名称应为 1–80 个字符");
+  if ((!topic.deletedAt && !name) || name.length > 80) throw new Error("空间名称应为 1–80 个字符");
   const next = { ...topic, name };
   if (!shouldQueue) { await db.topics.put(next); return next; }
   await db.transaction("rw", db.topics, db.events, async () => {
@@ -296,8 +296,7 @@ export async function saveTopic(topic: Topic, shouldQueue = true) {
 }
 
 export async function saveTopicMembership(topic: Topic, note: Note, input: { pinned?: boolean; deletedAt?: string } = {}) {
-  if (!input.deletedAt && (topic.deletedAt || note.deletedAt)) throw new Error("主题或记录已不可用");
-  if (!input.deletedAt && input.pinned && note.kind !== "procedure") throw new Error("只有操作记录可以在主题内置顶");
+  if (!input.deletedAt && (topic.deletedAt || note.deletedAt)) throw new Error("空间或记录已不可用");
   const timestamp = now();
   const existing = await db.topicMemberships.where("[topicId+noteId]").equals([topic.id, note.id]).first();
   const membership: TopicMembership = existing ? {
@@ -313,6 +312,29 @@ export async function saveTopicMembership(topic: Topic, note: Note, input: { pin
     await db.events.put({ id: newID(), payload: { kind: "topic-membership.upsert", topicSyncId: topic.syncId, noteSyncId: note.syncId, membership }, createdAt: timestamp });
   });
   return membership;
+}
+
+export async function createSpaceNote(content: string, continuedFromId?: string, topicId?: string) {
+  return db.transaction("rw", [db.notes, db.topics, db.topicMemberships, db.events], async () => {
+    const topic = topicId ? await db.topics.get(topicId) : undefined;
+    if (topicId && (!topic || topic.deletedAt || topic.archivedAt)) throw new Error("空间不可用，请先恢复空间或将草稿改存到日常");
+    const note = await createNote(content, continuedFromId);
+    if (topic) await saveTopicMembership(topic, note);
+    return note;
+  });
+}
+
+export async function addNotesToSpace(topicId: string, noteIds: string[]) {
+  await db.transaction("rw", [db.notes, db.topics, db.topicMemberships, db.events], async () => {
+    const topic = await db.topics.get(topicId);
+    if (!topic || topic.deletedAt || topic.archivedAt) throw new Error("空间不可用，请先恢复空间");
+    for (const noteId of new Set(noteIds)) {
+      const note = await db.notes.get(noteId);
+      if (!note || note.deletedAt) throw new Error("记录已不可用，请重新选择");
+      const membership = await db.topicMemberships.where("[topicId+noteId]").equals([topicId, noteId]).first();
+      if (!membership || membership.deletedAt) await saveTopicMembership(topic, note);
+    }
+  });
 }
 
 export async function upsertIncoming(payload: SyncPayload, blob?: Blob, authoritative = false) {
@@ -429,8 +451,8 @@ export async function restoreBackup(value: unknown) {
   if (!materialLinks.every(link => typeof link.id === "string" && typeof link.syncId === "string" && noteByID.get(link.noteId)?.kind === "procedure" && noteByID.get(link.materialId)?.kind === "material")) throw new Error("备份中的素材来源关系无效");
   if (!verifications.every(item => typeof item.id === "string" && typeof item.syncId === "string" && noteByID.get(item.noteId)?.kind === "procedure" && item.noteRevision > 0 && item.noteRevision <= (noteByID.get(item.noteId)?.revision ?? 0) && ["success", "partial", "failed"].includes(item.result) && typeof item.environment === "string" && Boolean(item.environment.trim()))) throw new Error("备份中的使用记录无效");
   const topicByID = new Map(topics.map(topic => [topic.id, topic]));
-  if (!topics.every(topic => typeof topic.id === "string" && typeof topic.syncId === "string" && typeof topic.name === "string" && Boolean(topic.name.trim()))) throw new Error("备份中的主题无效");
-  if (!topicMemberships.every(item => typeof item.id === "string" && typeof item.syncId === "string" && topicByID.has(item.topicId) && noteByID.has(item.noteId) && typeof item.pinned === "boolean" && (!item.pinned || noteByID.get(item.noteId)?.kind === "procedure"))) throw new Error("备份中的主题成员关系无效");
+  if (!topics.every(topic => typeof topic.id === "string" && typeof topic.syncId === "string" && typeof topic.name === "string" && Boolean(topic.name.trim()) && (topic.hiddenFromDaily === undefined || typeof topic.hiddenFromDaily === "boolean") && (topic.archivedAt === undefined || (typeof topic.archivedAt === "string" && Number.isFinite(Date.parse(topic.archivedAt)))))) throw new Error("备份中的空间无效");
+  if (!topicMemberships.every(item => typeof item.id === "string" && typeof item.syncId === "string" && topicByID.has(item.topicId) && noteByID.has(item.noteId) && typeof item.pinned === "boolean")) throw new Error("备份中的空间成员关系无效");
   await db.transaction("rw", [db.notes, db.sources, db.materialLinks, db.verifications, db.topics, db.topicMemberships, db.attachments, db.events], async () => {
     await Promise.all([db.notes.clear(), db.sources.clear(), db.materialLinks.clear(), db.verifications.clear(), db.topics.clear(), db.topicMemberships.clear(), db.attachments.clear(), db.events.clear()]);
     await db.notes.bulkPut(notes.map(note => ({ ...note, kind: note.kind ?? "note" })));
@@ -486,7 +508,7 @@ export async function markdownExport() {
     const noteVerifications = verifications.filter(item => item.noteId === note.id);
     const topicNames = topicMemberships.filter(item => item.noteId === note.id && !item.deletedAt).map(item => topicByID.get(item.topicId)?.name).filter((name): name is string => Boolean(name)).sort();
     const kind = note.kind === "procedure" ? `类型：操作记录\n状态：${verificationExportStatus(note, noteVerifications)}` : note.kind === "material" ? "类型：原始素材" : "";
-    return [`# ${note.title}`, "", `创建于：${note.createdAt}`, topicNames.length ? `主题：${topicNames.join("、")}` : "", kind, materialTitles.length ? `提炼自：${materialTitles.join("、")}` : "", source ? `来源：${source.title || source.url} (${source.url})` : "", "", note.content, ""].filter(Boolean).join("\n");
+    return [`# ${note.title}`, "", `创建于：${note.createdAt}`, topicNames.length ? `空间：${topicNames.join("、")}` : "", kind, materialTitles.length ? `提炼自：${materialTitles.join("、")}` : "", source ? `来源：${source.title || source.url} (${source.url})` : "", "", note.content, ""].filter(Boolean).join("\n");
   }).join("\n---\n\n");
 }
 

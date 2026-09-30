@@ -168,14 +168,19 @@ export class ServerSync {
     }
 
     if (Array.isArray(snapshot.topics)) {
-      const serverTopicSyncIDs = new Set(snapshot.topics.map(topic => topic.syncId));
-      for (const topic of snapshot.topics) await upsertIncoming({ kind: "topic.upsert", topic });
-      for (const localTopic of await db.topics.toArray()) {
-        if (!serverTopicSyncIDs.has(localTopic.syncId)) {
-          await db.topicMemberships.where("topicId").equals(localTopic.id).delete();
-          await db.topics.delete(localTopic.id);
+      await db.transaction("rw", [db.topics, db.topicMemberships, db.events], async () => {
+        const pending = await db.events.toArray();
+        const pendingTopics = new Set(pending.flatMap(event => event.payload.kind === "topic.upsert" ? [event.payload.topic.syncId] : []));
+        const pendingMembershipTopics = new Set(pending.flatMap(event => event.payload.kind === "topic-membership.upsert" ? [event.payload.topicSyncId] : []));
+        const serverTopicSyncIDs = new Set(snapshot.topics!.map(topic => topic.syncId));
+        for (const topic of snapshot.topics!) if (!pendingTopics.has(topic.syncId)) await upsertIncoming({ kind: "topic.upsert", topic });
+        for (const localTopic of await db.topics.toArray()) {
+          if (!serverTopicSyncIDs.has(localTopic.syncId) && !pendingTopics.has(localTopic.syncId) && !pendingMembershipTopics.has(localTopic.syncId)) {
+            await db.topicMemberships.where("topicId").equals(localTopic.id).delete();
+            await db.topics.delete(localTopic.id);
+          }
         }
-      }
+      });
     }
 
     const noteByServerID = new Map(snapshot.notes.map(note => [note.id, note]));
@@ -211,16 +216,21 @@ export class ServerSync {
       }
     }
     if (Array.isArray(snapshot.topicMemberships)) {
-      const serverMembershipSyncIDs = new Set(snapshot.topicMemberships.map(item => item.syncId));
-      for (const membership of snapshot.topicMemberships) {
-        const topic = snapshot.topics?.find(item => item.id === membership.topicId);
-        const note = noteByServerID.get(membership.noteId);
-        if (topic && note) await upsertIncoming({ kind: "topic-membership.upsert", topicSyncId: topic.syncId, noteSyncId: note.syncId, membership });
-      }
-      for (const localMembership of await db.topicMemberships.toArray()) {
-        const localTopic = await db.topics.get(localMembership.topicId); const localNote = await db.notes.get(localMembership.noteId);
-        if (localTopic && localNote && serverNoteSyncIDs.has(localNote.syncId) && snapshot.topics?.some(topic => topic.syncId === localTopic.syncId) && !serverMembershipSyncIDs.has(localMembership.syncId)) await db.topicMemberships.delete(localMembership.id);
-      }
+      await db.transaction("rw", [db.topics, db.notes, db.topicMemberships, db.events], async () => {
+        const pending = (await db.events.toArray()).flatMap(event => event.payload.kind === "topic-membership.upsert" ? [event.payload] : []);
+        const pendingIDs = new Set(pending.map(payload => payload.membership.syncId));
+        const pendingPairs = new Set(pending.map(payload => `${payload.topicSyncId}/${payload.noteSyncId}`));
+        const serverMembershipSyncIDs = new Set(snapshot.topicMemberships!.map(item => item.syncId));
+        for (const membership of snapshot.topicMemberships!) {
+          const topic = snapshot.topics?.find(item => item.id === membership.topicId);
+          const note = noteByServerID.get(membership.noteId);
+          if (topic && note && !pendingPairs.has(`${topic.syncId}/${note.syncId}`)) await upsertIncoming({ kind: "topic-membership.upsert", topicSyncId: topic.syncId, noteSyncId: note.syncId, membership });
+        }
+        for (const localMembership of await db.topicMemberships.toArray()) {
+          const localTopic = await db.topics.get(localMembership.topicId); const localNote = await db.notes.get(localMembership.noteId);
+          if (localTopic && localNote && !pendingIDs.has(localMembership.syncId) && serverNoteSyncIDs.has(localNote.syncId) && snapshot.topics?.some(topic => topic.syncId === localTopic.syncId) && !serverMembershipSyncIDs.has(localMembership.syncId)) await db.topicMemberships.delete(localMembership.id);
+        }
+      });
     }
     for (const localSource of await db.sources.toArray()) {
       const localNote = await db.notes.get(localSource.noteId);
