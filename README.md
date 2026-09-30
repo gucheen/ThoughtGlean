@@ -1,41 +1,54 @@
 # 拾念 · ThoughtGlean
 
-拾念是一个个人随手记：随手记下此刻的想法，需要时再找回来。
+个人随手记：随手记下此刻的想法，需要时再找回来。
 
-打开就能写，正文足够，写完就能离开。不要求分类、提炼或验证，也不要求每条记录都成为可复用知识。产品取舍见 [docs/product-principles.md](docs/product-principles.md)。
+## 功能
 
-## 当前能力
+- 快速记录、自动保存草稿、Markdown 编辑、续写和多图片粘贴上传。
+- 按创建时间浏览日常记录，支持星标、多词搜索、图片和时间筛选。
+- 用空间聚合相关记录，支持批量加入、空间内置顶、从日常收起和归档。
+- 接收分享文本，保存为记录或追加到草稿；支持安装为 PWA。
+- 离线记录与跨设备同步，保留编辑冲突，删除后可从回收站恢复。
+- 个人访问密钥和 Passkey 登录，支持完整备份、恢复与 Markdown 导出。
 
-- React/Vite 前端、History API 路由与可安装 PWA；
-- Dexie / IndexedDB 离线副本，断网时仍可记录、搜索与编辑；
-- Go + SQLite 服务端权威存储和跨设备同步；
-- Passkey 优先登录，个人访问密钥作为首次设置和恢复入口；
-- 随机 ID、revision 冲突保护、软删除与恢复；
-- 首页快速记录、自动保存草稿、按创建时间排列的日常时间流与星标；
-- 可选的场景空间：空间内记录与搜索、批量加入已有记录、空间内置顶、从日常收起和归档恢复；
-- 多词搜索、按需展开的图片和时间筛选、续写与 Markdown 正文；
-- 分享文本直接保存为普通记录，或追加到现有草稿；
-- 全部记录支持跨空间找回，包括已收起、已归档的内容和旧素材；旧主题沿用为可使用的空间，来源关系和使用历史保留在次级入口；
-- 多图片粘贴/上传、编辑模式删除与大图查看；
-- JSON 完整备份、恢复和 Markdown 导出；
-- Docker Compose 单入口部署。
+## 部署
 
-服务端保存权威数据，浏览器保留离线副本和待上传操作。首次用个人访问密钥登录后，可在设置中添加 Passkey；完整设计见 [docs/server-sync.md](docs/server-sync.md)。
-
-主流程不再提供操作提炼和使用验证。空间只在需要聚合使用场景时启用，不要求记录前分类；已有数据继续参与同步、备份与恢复。[对话提炼方案](docs/conversation-distillation-product-design.md)仅作为历史设计保留，不作为后续功能路线。
-
-## 本地开发
-
-需要 Go 1.26、Node.js 20+ 和 pnpm 11。
-
-先启动服务端：
+需要 Docker 和 Docker Compose。在仓库目录执行：
 
 ```bash
-mkdir -p data
-THOUGHTGLEAN_OWNER_TOKEN='仅供本机开发的长随机字符串' go run ./cmd/thoughtglean
+cp .env.example .env
+openssl rand -hex 32
 ```
 
-再在另一个终端启动前端：
+将生成值填入 `.env` 的 `THOUGHTGLEAN_OWNER_TOKEN`，再启动：
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+打开 **http://localhost:8080**，使用该访问密钥登录。默认数据保存在 `./data`，自动备份保存在 `./backups`。
+
+域名与 HTTPS、配置、更新和备份操作见[部署与维护](docs/deployment.md)。
+
+## 使用
+
+1. 在首页输入正文，点击「保存」；标题和空间均可选，未提交内容会自动保存为本机草稿。
+2. 在「日常」浏览记录，用星标或搜索找回内容；详情页可编辑、续写、添加图片。
+3. 需要按场景集中使用时创建空间。一条记录可加入多个空间，移出空间不会删除原文。
+4. 空间收起或归档后，其中记录会移出日常，仍可在「全部记录」和「星标」中找回。
+5. 在「设置」中添加 Passkey、查看同步状态、打开回收站、备份或导出数据。
+
+离线使用、冲突处理和恢复注意事项见[同步与数据管理](docs/server-sync.md)。
+
+## 本地运行
+
+需要 Go 1.26、Node.js 22 和 pnpm 11。在两个终端分别运行：
+
+```bash
+THOUGHTGLEAN_OWNER_TOKEN='替换为至少32个字符的随机密钥' go run ./cmd/thoughtglean
+```
 
 ```bash
 corepack enable
@@ -43,101 +56,4 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Vite 默认使用 `http://localhost:5173`，并把 `/api` 代理到 `http://127.0.0.1:8080`。若服务端端口不同，可以设置 `THOUGHTGLEAN_DEV_API_URL`：
-
-```bash
-THOUGHTGLEAN_DEV_API_URL=http://127.0.0.1:18080 pnpm dev
-```
-
-Go 服务只提供 `/api/*`，不依赖预生成的前端文件。开发时访问 Vite 地址；Docker 部署时由 Nginx 提供前端静态文件并代理 API。
-
-## Docker 部署
-
-首次部署先生成配置：
-
-```bash
-cp .env.example .env
-openssl rand -hex 32
-```
-
-把生成值写入 `.env` 的 `THOUGHTGLEAN_OWNER_TOKEN`，然后运行：
-
-```bash
-docker compose up -d --build
-docker compose ps
-```
-
-默认入口为 `http://127.0.0.1:8080`。`web` 容器提供静态前端并把 `/api/*` 代理到内部 `server`；服务端不会直接暴露到宿主机。
-
-本机默认 Passkey 地址是 `http://localhost:8080`。正式域名部署时，必须把 `.env` 中 `THOUGHTGLEAN_PASSKEY_RP_ID` 改为域名（不带协议和端口），把 `THOUGHTGLEAN_PASSKEY_ORIGIN` 改为浏览器访问的完整 HTTPS Origin，例如 `https://notes.example.com`。Passkey 绑定 Origin，修改域名后需要重新注册。
-
-`.env.example` 默认将 `/data` 绑定到仓库的 `./data`，将自动备份绑定到独立的 `./backups`。若删除对应路径配置，Compose 会使用 `thoughtglean-data` 和 `thoughtglean-backups` 命名卷。容器会匹配挂载目录的 UID/GID，无需使用 `777` 权限。
-
-## 自动备份与恢复演练
-
-服务启动后会立即生成一份完整 ZIP 备份，之后默认每 24 小时生成一次，并保留最近 14 份。每份备份包含记录、修订历史、来源、使用验证、主题关系和所有图片；写入采用临时文件、磁盘同步和原子重命名，未完成的备份不会出现在正式文件名中。
-
-可以随时手动生成一份备份：
-
-```bash
-docker compose exec server /app/server-entrypoint.sh backup-now
-```
-
-输出包含备份路径、记录数、附件数和清单 SHA-256。查看宿主机上的备份：
-
-```bash
-ls -lh backups/thoughtglean-auto-*.zip
-```
-
-建议定期选择最新备份执行恢复演练：
-
-```bash
-docker compose exec server \
-  /app/server-entrypoint.sh restore-drill \
-  /backups/thoughtglean-auto-YYYYMMDDTHHMMSS.NNNNNNNNNZ.zip
-```
-
-演练会在容器临时目录创建全新的 SQLite 数据库和附件库，验证 ZIP、备份清单、修订历史和每张图片的哈希，完成恢复后逐项比较；不会读写正式 `/data`。命令以退出码 `0` 表示成功，其他退出码表示该备份不能可靠恢复。
-
-自动备份主要防止误删除、错误同步和数据库逻辑损坏。若 `data` 与 `backups` 位于同一块磁盘，它不能防止整盘故障；正式使用时应将 `THOUGHTGLEAN_BACKUP_PATH` 指向另一块磁盘，并把备份目录再同步到异地存储。
-
-生产环境必须在入口前配置 HTTPS。若仅在可信局域网临时测试手机访问，可将 `THOUGHTGLEAN_HTTP_BIND` 改为 `0.0.0.0`；但移动浏览器在普通局域网 HTTP 地址上不会开放 Passkey，需使用 HTTPS。长期部署仍应使用 HTTPS 和不可猜测的个人访问密钥。
-
-`docker compose down` 不会删除数据；不要执行 `docker compose down -v`，除非明确要永久删除命名卷中的全部数据。
-
-## GitHub Actions 与 GHCR
-
-仓库内置 `.github/workflows/container.yml`：Pull Request 会执行前后端测试并验证两个 Docker 目标；推送到 `main`、推送 `v*` 版本标签或手动触发时，会构建 `linux/amd64` 镜像并发布到：
-
-- `ghcr.io/gucheen/thoughtglean-server`
-- `ghcr.io/gucheen/thoughtglean-web`
-
-`main` 生成 `latest`、`main` 和提交 SHA 标签；`v1.2.3` 会生成 `1.2.3`、`1.2` 和提交 SHA 标签。流水线使用仓库自带的 `GITHUB_TOKEN` 发布，不需要额外配置 GHCR 密钥，并为发布镜像生成 provenance attestation。首次发布后，可在 GitHub Packages 设置中按需把镜像可见性调整为 Public。
-
-服务端使用无 CGO 的 SQLite 驱动，CI 在 `CGO_ENABLED=0` 下执行测试、静态检查和构建，不需要安装 C 编译工具链。
-
-## 配置
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `THOUGHTGLEAN_ADDR` | `127.0.0.1:8080` | Go 服务监听地址 |
-| `THOUGHTGLEAN_DATA_DIR` | `./data` | SQLite 与附件数据目录 |
-| `THOUGHTGLEAN_BACKUP_DIR` | `<数据目录>/backups` | 自动备份输出目录；Docker 中为 `/backups` |
-| `THOUGHTGLEAN_BACKUP_INTERVAL` | `24h` | 自动备份间隔；设为 `0` 可禁用，其他值至少为 `1m` |
-| `THOUGHTGLEAN_BACKUP_KEEP` | `14` | 自动备份保留份数 |
-| `THOUGHTGLEAN_OWNER_TOKEN` | 必填 | 至少 32 个字符的单人网页登录密钥 |
-| `THOUGHTGLEAN_VERSION` | `0.1.0` | Docker 构建版本，显示在设置的运行状态中 |
-| `THOUGHTGLEAN_PASSKEY_RP_ID` | `localhost` | Passkey 依赖方域名，不含协议和端口 |
-| `THOUGHTGLEAN_PASSKEY_ORIGIN` | `http://localhost:5173` | 浏览器访问应用的完整 Origin；Docker 默认在 `.env.example` 中设为 `http://localhost:8080` |
-| `THOUGHTGLEAN_DEV_API_URL` | `http://127.0.0.1:8080` | Vite 开发代理目标 |
-
-## 验证
-
-```bash
-go test ./...
-go vet ./...
-go build ./cmd/thoughtglean
-pnpm check
-pnpm build
-docker compose config
-```
+访问 `http://localhost:5173`。前端默认代理 API 到 `http://127.0.0.1:8080`，可用 `THOUGHTGLEAN_DEV_API_URL` 更改目标。
