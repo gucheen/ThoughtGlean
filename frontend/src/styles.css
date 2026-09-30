@@ -147,7 +147,15 @@ button { cursor: pointer; }
 .topics-heading h1 { margin: 0; font-size: 28px; letter-spacing: -.035em; }
 .topics-heading p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .topic-heading-actions { display: flex; align-items: center; gap: 8px; }
-.topic-overview-back { margin: -6px 0 15px; }
+.topics-heading.space-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.space-heading-title { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.topics-heading.space-heading h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; letter-spacing: -.02em; }
+.space-heading .topic-overview-back { flex-shrink: 0; padding: 0; width: 28px; min-height: 32px; color: var(--muted); }
+.space-heading .topic-heading-actions { flex-shrink: 0; gap: 4px; }
+.space-heading .topic-heading-actions > button { min-height: 32px; padding: 0 7px; font-size: 11px; white-space: nowrap; }
+.space-heading .space-settings-toggle { width: 32px; font-size: 18px; letter-spacing: 1px; }
+.space-settings-toggle[aria-expanded="true"] { background: var(--surface-muted); }
+.space-status { flex-shrink: 0; color: var(--muted); font-size: 10px; }
 .topic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 .topic-card { min-height: 104px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); text-align: left; }
 .topic-card:hover { border-color: var(--accent-border); background: var(--surface-subtle); }

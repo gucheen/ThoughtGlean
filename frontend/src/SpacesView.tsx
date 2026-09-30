@@ -11,6 +11,8 @@ type Props = {
 export function SpacesView({ topics, selectedTopic, requestedTopicID, notes, allNotes, memberships, query, keyboardSelectedID, children, onOpenTopic, onOpenNote, onChange }: Props) {
   const [name, setName] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => { setSettingsOpen(false); setRenaming(false); }, [selectedTopic?.id]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [adding, setAdding] = useState(false);
@@ -47,21 +49,34 @@ export function SpacesView({ topics, selectedTopic, requestedTopicID, notes, all
   if (requestedTopicID && !selectedTopic) return <section className="empty-state"><h1>空间暂不可用</h1><p>它可能尚未同步到本机，或已被删除。</p><button className="button button-secondary" onClick={() => onOpenTopic()}>返回空间列表</button></section>;
 
   return <section className="topics-view">
-    {selectedTopic && <button className="text-button topic-overview-back" onClick={() => onOpenTopic()}>← 所有空间</button>}
-    <header className="topics-heading"><div><h1>{selectedTopic?.name ?? "空间"}</h1><p>{selectedTopic ? selectedTopic.archivedAt ? "已归档，内容仍可阅读和搜索。恢复后可继续记录。" : "在这里记录和查找这个场景下需要的内容。" : "把一起使用的内容放在一起，需要时进入。"}</p></div>
-      {selectedTopic && !selectedTopic.archivedAt && <div className="topic-heading-actions"><button ref={addButton} className="button button-secondary" onClick={() => { setSelection(new Set()); setCandidateQuery(""); setError(""); setAdding(true); }}>加入已有记录</button><button className="text-button" onClick={() => { setName(selectedTopic.name); setRenaming(value => !value); }}>重命名</button></div>}
+    <header className={`topics-heading ${selectedTopic ? "space-heading" : ""}`}>
+      {selectedTopic ? <>
+        <div className="space-heading-title">
+          <button className="text-button topic-overview-back" aria-label="← 所有空间" title="所有空间" onClick={() => onOpenTopic()}>←</button>
+          <h1 title={selectedTopic.name}>{selectedTopic.name}</h1>
+          {selectedTopic.archivedAt && <span className="space-status">已归档</span>}
+        </div>
+        <div className="topic-heading-actions">
+          {selectedTopic.archivedAt ? <button className="text-button" disabled={busy} onClick={() => void patch({ archivedAt: undefined })}>恢复空间</button> : <>
+            <button ref={addButton} className="text-button" aria-label="加入已有记录" onClick={() => { setSelection(new Set()); setCandidateQuery(""); setError(""); setAdding(true); }}>＋ 加入记录</button>
+            <button className="text-button space-settings-toggle" aria-label="空间设置" title="空间设置" aria-expanded={settingsOpen} aria-controls="space-settings" onClick={() => { setSettingsOpen(value => !value); setRenaming(false); }}>···</button>
+          </>}
+        </div>
+      </> : <div><h1>空间</h1><p>把一起使用的内容放在一起，需要时进入。</p></div>}
     </header>
+    {selectedTopic && !selectedTopic.archivedAt && settingsOpen && <div className="space-options" id="space-settings" role="region" aria-label="空间设置">
+      <button className="text-button" onClick={() => { setName(selectedTopic.name); setRenaming(value => !value); }}>重命名</button>
+      <label><input type="checkbox" checked={Boolean(selectedTopic.hiddenFromDaily)} disabled={busy} onChange={event => void patch({ hiddenFromDaily: event.target.checked })} />从日常收起内容</label>
+      <button className="text-button" disabled={busy} onClick={() => void patch({ archivedAt: now() })}>归档空间</button>
+      <small>收起或归档后，记录仍可在此空间、星标和全部记录中找到。</small>
+    </div>}
     {error && !adding && <p className="inline-error" role="alert">{error}</p>}
-    {(!selectedTopic || renaming) && <form className="space-name-form" onSubmit={event => { event.preventDefault(); void run(async () => {
+    {(!selectedTopic || (renaming && settingsOpen && !selectedTopic.archivedAt)) && <form className="space-name-form" onSubmit={event => { event.preventDefault(); void run(async () => {
       if (selectedTopic) { await saveTopic({ ...selectedTopic, name, updatedAt: now() }); setRenaming(false); }
       else { const topic = await createTopic(name); onOpenTopic(topic.id); }
       setName("");
     }); }}><label>{selectedTopic ? "空间名称" : "新空间名称"}<input value={name} maxLength={80} onChange={event => setName(event.target.value)} placeholder="例如：最近在玩的游戏" /></label><button className="button button-secondary" disabled={busy || !name.trim()}>{selectedTopic ? "保存名称" : "创建空间"}</button></form>}
     {selectedTopic ? <>
-      <div className="space-options">{selectedTopic.archivedAt ? <button className="button button-secondary" disabled={busy} onClick={() => void patch({ archivedAt: undefined })}>恢复空间</button> : <>
-        <label><input type="checkbox" checked={Boolean(selectedTopic.hiddenFromDaily)} disabled={busy} onChange={event => void patch({ hiddenFromDaily: event.target.checked })} />从日常收起内容</label>
-        <button className="text-button" disabled={busy} onClick={() => void patch({ archivedAt: now() })}>归档空间</button>
-      </>}<small>{selectedTopic.archivedAt ? "归档内容不出现在日常，始终保留在全部记录中。" : "收起后仍可在此空间、星标和全部记录中找到。"}</small></div>
       {children}
       <div className="topic-groups">{groups.map(({ title, items }) => {
         return items.length > 0 && <section key={title} aria-label={title}><h2>{title}<small>{items.length}</small></h2><div className="topic-note-list">{items.map(note => <article key={note.id} className={`topic-note-card ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id}>

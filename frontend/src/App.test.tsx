@@ -69,6 +69,8 @@ describe("core note interactions", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "加入空间" }));
     await waitFor(() => expect(dialog).not.toHaveAttribute("open"));
     expect(await db.topicMemberships.count()).toBe(2);
+    expect(screen.queryByRole("checkbox", { name: "从日常收起内容" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "空间设置" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "从日常收起内容" }));
     await waitFor(async () => expect(await db.topics.get(topic.id)).toMatchObject({ hiddenFromDaily: true }));
     await userEvent.click(screen.getByRole("button", { name: "日常" }));
@@ -78,6 +80,7 @@ describe("core note interactions", () => {
     await userEvent.click(screen.getByRole("button", { name: "全部记录" }));
     expect(await screen.findByText(first.title, { selector: ".note-row-title" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: topic.name }));
+    await userEvent.click(screen.getByRole("button", { name: "空间设置" }));
     await userEvent.click(screen.getByRole("button", { name: "归档空间" }));
     expect(await screen.findByRole("button", { name: "恢复空间" })).toBeInTheDocument();
     expect(within(screen.getByRole("navigation", { name: "常用空间" })).queryByRole("button", { name: topic.name })).not.toBeInTheDocument();
