@@ -477,7 +477,7 @@ export function App() {
   };
 
   return <div className={`app-shell ${selected && editing ? "is-detail-editing" : ""}`}>
-    <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong><small>ThoughtGlean</small></span></button><div className="topbar-main"><label className="search-box"><span className="search-icon" aria-hidden="true" /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
+    <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong><small>ThoughtGlean</small></span></button><div className="topbar-main"><label className="search-box"><span className="search-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.25" /><path d="m12 12 5 5" stroke="currentColor" strokeWidth="1.25" /></svg></span><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
       if (event.key === "ArrowDown" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current + 1) % keyboardNotes.length); }
       else if (event.key === "ArrowUp" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current - 1 + keyboardNotes.length) % keyboardNotes.length); }
       else if (event.key === "Enter" && keyboardSelectedID) { event.preventDefault(); showNote(keyboardSelectedID); }

@@ -61,4 +61,4 @@ pnpm dev
 
 ## 页面设计
 
-界面遵循 [Fluent Design 设计规则](docs/fluent-design.md)，包括颜色、字体、材质、键盘焦点和动效约束。后续页面和组件调整沿用该规则。
+界面遵循 [Notion Style 设计规则](docs/notion-design.md)，包括系统字体、米色侧栏、内容块、键盘焦点和交互约束。后续页面和组件调整沿用该规则。
