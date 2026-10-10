@@ -2,14 +2,12 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
-	"github.com/go-webauthn/webauthn/webauthn"
 	"thoughtglean/internal/store"
 )
 
@@ -29,32 +27,6 @@ func TestHealthIncludesServerVersion(t *testing.T) {
 	response := requestJSON(t, app, http.MethodGet, "/api/health", nil)
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"version":"test-build"`)) {
 		t.Fatalf("health status=%d body=%s", response.Code, response.Body.String())
-	}
-}
-
-func TestPasskeyConfiguredProtectsDataAPIs(t *testing.T) {
-	app := testApp(t)
-	owner, err := app.store.CreateOwner(context.Background(), "owner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.store.AddPasskeyCredential(context.Background(), owner, webauthn.Credential{ID: []byte("credential")}); err != nil {
-		t.Fatal(err)
-	}
-	blocked := requestJSON(t, app, http.MethodGet, "/api/notes", nil)
-	if blocked.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthed status=%d body=%s", blocked.Code, blocked.Body.String())
-	}
-	token, err := app.store.CreateAuthSession(context.Background(), owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/notes", nil)
-	req.AddCookie(&http.Cookie{Name: "thoughtglean_session", Value: token})
-	response := httptest.NewRecorder()
-	app.ServeHTTP(response, req)
-	if response.Code != http.StatusOK {
-		t.Fatalf("authed status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -90,29 +62,6 @@ func TestOwnerTokenProtectsPlaintextSync(t *testing.T) {
 	app.ServeHTTP(snapshot, snapshotRequest)
 	if snapshot.Code != http.StatusOK || !bytes.Contains(snapshot.Body.Bytes(), []byte("明文同步内容")) {
 		t.Fatalf("snapshot status=%d body=%s", snapshot.Code, snapshot.Body.String())
-	}
-}
-
-func TestPasskeySessionAlsoAuthenticatesOwnerTokenMode(t *testing.T) {
-	app := testApp(t)
-	app.SetOwnerToken("personal-test-token")
-	owner, err := app.store.CreateOwner(context.Background(), "owner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.store.AddPasskeyCredential(context.Background(), owner, webauthn.Credential{ID: []byte("passkey-credential")}); err != nil {
-		t.Fatal(err)
-	}
-	token, err := app.store.CreateAuthSession(context.Background(), owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := httptest.NewRequest(http.MethodGet, "/api/sync/snapshot", nil)
-	request.AddCookie(&http.Cookie{Name: "thoughtglean_session", Value: token})
-	response := httptest.NewRecorder()
-	app.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("passkey session status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -274,9 +223,7 @@ func TestCrossOriginWriteChecksSchemeAndFetchMetadata(t *testing.T) {
 
 func TestConfiguredOriginCanWriteThroughDevelopmentProxy(t *testing.T) {
 	app := testApp(t)
-	if err := app.ConfigurePasskey("localhost", "http://localhost:5173"); err != nil {
-		t.Fatal(err)
-	}
+	app.trustedOrigins["http://localhost:5173"] = struct{}{}
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/notes", bytes.NewBufferString(`{"content":"正文"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "http://localhost:5173")

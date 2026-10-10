@@ -65,20 +65,28 @@ func main() {
 	application.SetAttachmentStore(attachmentStore)
 	application.SetVersion(version)
 	ownerToken := os.Getenv("THOUGHTGLEAN_OWNER_TOKEN")
-	if ownerToken == "" {
-		log.Fatal("THOUGHTGLEAN_OWNER_TOKEN is required")
-	}
-	if len(ownerToken) < 32 {
+	if ownerToken != "" && len(ownerToken) < 32 {
 		log.Fatal("THOUGHTGLEAN_OWNER_TOKEN must contain at least 32 characters")
 	}
 	application.SetOwnerToken(ownerToken)
-	passkeyRPID := envOr("THOUGHTGLEAN_PASSKEY_RP_ID", "localhost")
-	passkeyOrigin := envOr("THOUGHTGLEAN_PASSKEY_ORIGIN", "http://localhost:5173")
-	if err := application.ConfigurePasskey(passkeyRPID, passkeyOrigin); err != nil {
-		log.Fatalf("configure Passkey: %v", err)
+	oidcConfig := app.OIDCConfig{
+		Issuer:       os.Getenv("THOUGHTGLEAN_OIDC_ISSUER"),
+		ClientID:     os.Getenv("THOUGHTGLEAN_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("THOUGHTGLEAN_OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("THOUGHTGLEAN_OIDC_REDIRECT_URL"),
+		OwnerSubject: os.Getenv("THOUGHTGLEAN_OIDC_OWNER_SUBJECT"),
+	}
+	if oidcConfig.Issuer != "" || oidcConfig.ClientID != "" || oidcConfig.ClientSecret != "" || oidcConfig.RedirectURL != "" || oidcConfig.OwnerSubject != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := application.ConfigureOIDC(ctx, oidcConfig)
+		cancel()
+		if err != nil {
+			log.Fatalf("configure OIDC: %v", err)
+		}
+	} else if ownerToken == "" {
+		log.Fatal("configure OIDC or THOUGHTGLEAN_OWNER_TOKEN")
 	}
 	log.Printf("ThoughtGlean is running as a single-owner note server")
-	log.Printf("Passkey RP ID %q, origin %q", passkeyRPID, passkeyOrigin)
 
 	server := &http.Server{
 		Addr:              addr,

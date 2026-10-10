@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type RefObject } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { createSpaceNote, createNote, db, deleteAttachment, deleteLibraryMetadata, exportBackup, markdownExport, migrateLegacyLibrary, newID, now, queue, queueLibrarySnapshot, readLibraryMetadata, restoreBackup, saveAttachment, saveNote, saveTopicMembership, updateAttachmentAlt, writeLibraryMetadata, type Attachment, type Note, type NoteMaterialLink, type NoteSource, type NoteVerification, type Topic, type TopicMembership } from "./db";
-import { authStatus, deletePasskey, listPasskeys, login, loginWithPasskey, logout, registerPasskey, serverInfo, ServerSync, type PasskeyInfo } from "./sync";
+import { authStatus, login, loginWithOIDC, logout, serverInfo, ServerSync } from "./sync";
 import { clearSharedItems, readSharedItems, type SharedItem } from "./share";
 import { ShareReview, sharedNoteText, type PendingShare } from "./ShareReview";
 import { applyPWAUpdate, pwaUpdateEvent } from "./pwa";
@@ -77,14 +77,10 @@ export function App() {
   const [authLoaded, setAuthLoaded] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [accessToken, setAccessToken] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [passkeyEnabled, setPasskeyEnabled] = useState(false);
-  const [passkeyConfigured, setPasskeyConfigured] = useState(false);
+  const [loginError, setLoginError] = useState(new URLSearchParams(window.location.search).has("auth_error") ? "登录未完成，请重试并使用服务器允许的账号。" : "");
+  const [oidcEnabled, setOIDCEnabled] = useState(false);
   const [tokenLoginEnabled, setTokenLoginEnabled] = useState(false);
   const [showTokenLogin, setShowTokenLogin] = useState(false);
-  const [passkeys, setPasskeys] = useState<PasskeyInfo[]>([]);
-  const [passkeyBusy, setPasskeyBusy] = useState(false);
-  const [passkeyMessage, setPasskeyMessage] = useState("");
   const [syncStatus, setSyncStatus] = useState("本机保存；联网后自动同步。");
   const [lastSyncSuccess, setLastSyncSuccess] = useState<string>();
   const [lastSyncError, setLastSyncError] = useState<SyncErrorInfo>();
@@ -124,10 +120,10 @@ export function App() {
       try {
         const status = await authStatus();
         setAuthenticated(status.authenticated);
-        setPasskeyEnabled(status.enabled);
-        setPasskeyConfigured(status.configured);
+        setOIDCEnabled(status.oidcEnabled);
         setTokenLoginEnabled(status.tokenLoginEnabled);
-        setShowTokenLogin(!status.configured);
+        setShowTokenLogin(!status.oidcEnabled);
+        if (!status.authenticated) localStorage.removeItem("thoughtglean.owner-authenticated");
         if (status.authenticated) localStorage.setItem("thoughtglean.owner-authenticated", "1");
       } catch {
         if (localStorage.getItem("thoughtglean.owner-authenticated") === "1") {
@@ -203,10 +199,7 @@ export function App() {
     shareInboxChecked.current = true;
     void readSharedItems().then(async items => { await importSharedItems(items); await clearSharedItems(); }).catch(() => { shareInboxChecked.current = false; });
   }, [authenticated]);
-  useEffect(() => {
-    if (!settingsOpen || !passkeyConfigured) return;
-    void listPasskeys().then(setPasskeys).catch(error => setPasskeyMessage(error instanceof Error ? error.message : "无法读取 Passkey"));
-  }, [settingsOpen, passkeyConfigured]);
+
   useEffect(() => {
     if (!settingsOpen) return;
     setServerVersion("读取中…");
@@ -441,26 +434,6 @@ export function App() {
       localStorage.setItem("thoughtglean.owner-authenticated", "1");
     } catch (error) { setLoginError(error instanceof Error ? error.message : "登录失败"); }
   }
-  async function signInWithPasskey() {
-    try {
-      setLoginError(""); setPasskeyBusy(true); await loginWithPasskey(); setAuthenticated(true);
-      localStorage.setItem("thoughtglean.owner-authenticated", "1");
-    } catch (error) { setLoginError(error instanceof Error ? error.message : "Passkey 登录失败"); }
-    finally { setPasskeyBusy(false); }
-  }
-  async function setupPasskey() {
-    try {
-      setPasskeyMessage(""); setPasskeyBusy(true); await registerPasskey(passkeyConfigured);
-      setPasskeyConfigured(true); setPasskeys(await listPasskeys());
-      setPasskeyMessage(passkeyConfigured ? "备用 Passkey 已添加。" : "Passkey 已设置，今后可直接用设备验证登录。");
-    } catch (error) { setPasskeyMessage(error instanceof Error ? error.message : "Passkey 设置失败"); }
-    finally { setPasskeyBusy(false); }
-  }
-  async function removePasskey(item: PasskeyInfo) {
-    if (passkeys.length <= 1 || !confirm("删除这个 Passkey？删除后，这台设备保存的凭据将不能再用于登录。")) return;
-    try { setPasskeyMessage(""); await deletePasskey(item.id); setPasskeys(await listPasskeys()); setPasskeyMessage("Passkey 已删除。"); }
-    catch (error) { setPasskeyMessage(error instanceof Error ? error.message : "无法删除 Passkey"); }
-  }
   async function signOut() {
     try { await logout(); } finally {
       localStorage.removeItem("thoughtglean.owner-authenticated"); setAuthenticated(false); setSettingsOpen(false); setSyncStatus("已退出登录。");
@@ -468,16 +441,16 @@ export function App() {
   }
 
   if (!authLoaded) return null;
-  if (!authenticated) return <main className="auth-gate"><form className="auth-gate-card" onSubmit={event => { event.preventDefault(); if (showTokenLogin) void signIn(); else void signInWithPasskey(); }}>
-    <header className="auth-gate-header"><span className="auth-gate-brand"><i />拾念</span><p>THOUGHTGLEAN</p><h1>{showTokenLogin || !passkeyConfigured ? "使用密钥登录" : "欢迎回来"}</h1><span className="auth-gate-description">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? "使用设备上的 Passkey 快速登录。" : passkeyEnabled && !passkeyConfigured ? "登录后可在设置中启用 Passkey。" : "输入服务器配置的个人访问密钥。"}</span></header>
-    <div className="auth-gate-fields">{passkeyEnabled && passkeyConfigured && !showTokenLogin ? <>
-      <button className="button button-primary button-wide auth-submit" type="submit" disabled={passkeyBusy}>{passkeyBusy ? "正在验证…" : "使用 Passkey 登录"}</button>
+  if (!authenticated) return <main className="auth-gate"><form className="auth-gate-card" onSubmit={event => { event.preventDefault(); if (showTokenLogin) void signIn(); else loginWithOIDC(); }}>
+    <header className="auth-gate-header"><span className="auth-gate-brand"><i />拾念</span><p>THOUGHTGLEAN</p><h1>{showTokenLogin ? "使用密钥登录" : "欢迎回来"}</h1><span className="auth-gate-description">{oidcEnabled && !showTokenLogin ? "使用你的身份账号登录。" : "输入服务器配置的个人访问密钥。"}</span></header>
+    <div className="auth-gate-fields">{oidcEnabled && !showTokenLogin ? <>
+      <button className="button button-primary button-wide auth-submit" type="submit">使用身份账号登录</button>
       {tokenLoginEnabled && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(true); setLoginError(""); }}>改用个人访问密钥</button>}
-    </> : <>
+    </> : tokenLoginEnabled ? <>
       <label htmlFor="ownerToken">个人访问密钥</label><input id="ownerToken" type="password" value={accessToken} onChange={event => setAccessToken(event.target.value)} autoFocus autoComplete="current-password" placeholder="输入访问密钥" />
       <button className="button button-primary button-wide auth-submit" type="submit" disabled={!accessToken}>登录</button>
-      {passkeyConfigured && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(false); setLoginError(""); }}>返回 Passkey 登录</button>}
-    </>}{loginError && <p className="inline-error" role="alert">{loginError}</p>}</div>
+      {oidcEnabled && <button className="text-button auth-alternative" type="button" onClick={() => { setShowTokenLogin(false); setLoginError(""); }}>返回身份账号登录</button>}
+    </> : <p className="inline-error">服务器尚未配置登录方式或暂时无法连接。</p>}{loginError && <p className="inline-error" role="alert">{loginError}</p>}</div>
     <footer className="auth-gate-footer">个人应用 · 数据仅向你的服务器同步</footer>
   </form></main>;
 
@@ -532,13 +505,7 @@ export function App() {
           </div>
           <button className="button button-secondary" onClick={() => void syncNow()}>立即同步</button>
         </div>
-        {passkeyEnabled && <div className="settings-section passkey-section">
-          <h3>Passkey</h3>
-          <p className="muted">{passkeyConfigured ? "使用指纹、面容或设备解锁登录，无需重复输入访问密钥。" : "为这台设备设置快速、安全的登录方式。"}</p>
-          {passkeys.map((item, index) => <div className="passkey-row" key={item.id}><span><strong>Passkey {index + 1}</strong><small>添加于 {new Date(item.createdAt).toLocaleDateString()}</small></span>{passkeys.length > 1 && <button className="text-button danger" onClick={() => void removePasskey(item)}>删除</button>}</div>)}
-          <button className="button button-secondary" disabled={passkeyBusy} onClick={() => void setupPasskey()}>{passkeyBusy ? "等待设备验证…" : passkeyConfigured ? "添加备用 Passkey" : "设置 Passkey"}</button>
-          {passkeyMessage && <p className={passkeyMessage.includes("失败") || passkeyMessage.includes("无法") ? "inline-error" : "inline-success"}>{passkeyMessage}</p>}
-        </div>}
+        {oidcEnabled && <div className="settings-section"><h3>身份账号</h3><p className="muted">登录验证由你的身份服务提供。退出登录会结束此设备在拾念中的会话。</p></div>}
         <div className="settings-section settings-danger"><button className="button button-secondary" onClick={() => void signOut()}>退出登录</button></div>
       </section>
     </div>}

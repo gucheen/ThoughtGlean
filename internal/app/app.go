@@ -2,7 +2,6 @@ package app
 
 import (
 	"archive/zip"
-	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -19,8 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"thoughtglean/internal/attachments"
 	"thoughtglean/internal/store"
 )
@@ -28,7 +25,7 @@ import (
 type App struct {
 	store          *store.Store
 	attachments    *attachments.Store
-	passkey        *webauthn.WebAuthn
+	oidc           *oidcLogin
 	ownerToken     []byte
 	version        string
 	trustedOrigins map[string]struct{}
@@ -48,25 +45,6 @@ func (a *App) SetOwnerToken(token string) { a.ownerToken = []byte(token) }
 // owner can verify which server build is currently serving the application.
 func (a *App) SetVersion(version string) { a.version = version }
 
-func (a *App) ConfigurePasskey(rpID, origin string) error {
-	canonicalOrigin, err := normalizeOrigin(origin)
-	if err != nil {
-		return err
-	}
-	configured, err := webauthn.New(&webauthn.Config{RPID: rpID, RPDisplayName: "ThoughtGlean", RPOrigins: []string{origin},
-		AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
-		Timeouts: webauthn.TimeoutsConfig{
-			Registration: webauthn.TimeoutConfig{Enforce: true},
-			Login:        webauthn.TimeoutConfig{Enforce: true},
-		}})
-	if err != nil {
-		return err
-	}
-	a.passkey = configured
-	a.trustedOrigins[canonicalOrigin] = struct{}{}
-	return nil
-}
-
 func New(noteStore *store.Store) *App {
 	app := &App{store: noteStore, version: "dev", trustedOrigins: make(map[string]struct{})}
 	mux := http.NewServeMux()
@@ -82,15 +60,9 @@ func New(noteStore *store.Store) *App {
 	mux.HandleFunc("POST /api/backups/restore.zip", app.restoreFullBackup)
 	mux.HandleFunc("GET /api/auth/status", app.authStatus)
 	mux.HandleFunc("POST /api/auth/token", app.loginWithOwnerToken)
-	mux.HandleFunc("POST /api/auth/register/options", app.beginRegistration)
-	mux.HandleFunc("POST /api/auth/register/verify", app.finishRegistration)
-	mux.HandleFunc("POST /api/auth/login/options", app.beginLogin)
-	mux.HandleFunc("POST /api/auth/login/verify", app.finishLogin)
+	mux.HandleFunc("GET /api/auth/oidc/login", app.beginOIDCLogin)
+	mux.HandleFunc("GET /api/auth/oidc/callback", app.finishOIDCLogin)
 	mux.HandleFunc("POST /api/auth/logout", app.logout)
-	mux.HandleFunc("GET /api/auth/passkeys", app.listPasskeys)
-	mux.HandleFunc("POST /api/auth/passkeys/options", app.beginAdditionalPasskey)
-	mux.HandleFunc("POST /api/auth/passkeys/verify", app.finishAdditionalPasskey)
-	mux.HandleFunc("DELETE /api/auth/passkeys/{id}", app.deletePasskey)
 	mux.HandleFunc("GET /api/notes", app.listNotes)
 	mux.HandleFunc("POST /api/notes", app.createNote)
 	mux.HandleFunc("GET /api/notes/{id}", app.getNote)
@@ -298,17 +270,13 @@ func (a *App) applyLocalSyncAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) authStatus(w http.ResponseWriter, r *http.Request) {
-	configured, err := a.store.HasPasskey(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
+	w.Header().Set("Cache-Control", "no-store")
 	authenticated, err := a.hasAuthenticatedSession(r)
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"enabled": a.passkey != nil, "configured": configured, "authenticated": authenticated, "tokenLoginEnabled": len(a.ownerToken) != 0})
+	writeJSON(w, http.StatusOK, map[string]bool{"oidcEnabled": a.oidc != nil, "authenticated": authenticated, "tokenLoginEnabled": len(a.ownerToken) != 0})
 }
 
 func (a *App) loginWithOwnerToken(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +296,7 @@ func (a *App) loginWithOwnerToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "访问密钥不正确"})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: a.ownerSessionToken(), Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
+	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: a.ownerSessionToken(), Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: a.sessionIsSecure(r)})
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
@@ -357,259 +325,26 @@ func (a *App) hasAuthenticatedSession(r *http.Request) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	return a.store.ValidateAuthSession(r.Context(), cookie.Value)
+	if a.oidc == nil {
+		return false, nil
+	}
+	return a.store.ValidateOIDCSession(r.Context(), cookie.Value, a.oidc.scope)
 }
 
 func requestIsHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request) {
-	if a.passkey == nil {
-		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
-		return
-	}
-	configured, err := a.store.HasPasskey(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if configured {
-		writeAPIError(w, &clientError{Status: http.StatusForbidden, Message: "a passkey is already registered"})
-		return
-	}
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := decodeJSON(w, r, &body); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if errors.Is(err, store.ErrNotFound) {
-		if body.Name == "" {
-			body.Name = "ThoughtGlean owner"
-		}
-		owner, err = a.store.CreateOwner(r.Context(), body.Name)
-	}
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	options, session, err := a.passkey.BeginRegistration(owner,
-		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}))
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	ceremonyID, err := a.store.CreateAuthCeremony(r.Context(), "registration", *session)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ceremonyId": base64.RawURLEncoding.EncodeToString(ceremonyID), "publicKey": options.Response})
-}
-
-func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request) {
-	a.finishPasskeyRegistration(w, r, true)
-}
-
-func (a *App) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request, createSession bool) {
-	if a.passkey == nil {
-		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
-		return
-	}
-	var body struct {
-		CeremonyID string          `json:"ceremonyId"`
-		Credential json.RawMessage `json:"credential"`
-	}
-	if err := decodeJSON(w, r, &body); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	ceremonyID, err := base64.RawURLEncoding.DecodeString(body.CeremonyID)
-	if err != nil || len(ceremonyID) != 32 || len(body.Credential) == 0 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid registration response"})
-		return
-	}
-	session, err := a.store.TakeAuthCeremony(r.Context(), ceremonyID, "registration")
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	verification := r.Clone(r.Context())
-	verification.Body = io.NopCloser(bytes.NewReader(body.Credential))
-	verification.Header.Set("Content-Type", "application/json")
-	credential, err := a.passkey.FinishRegistration(owner, session, verification)
-	if err != nil {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "passkey registration could not be verified"})
-		return
-	}
-	if err := a.store.AddPasskeyCredential(r.Context(), owner, *credential); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if createSession {
-		token, err := a.store.CreateAuthSession(r.Context(), owner)
-		if err != nil {
-			writeAPIError(w, err)
-			return
-		}
-		http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
-	}
-	writeJSON(w, http.StatusCreated, map[string]bool{"registered": true})
-}
-
-func (a *App) beginAdditionalPasskey(w http.ResponseWriter, r *http.Request) {
-	if a.passkey == nil {
-		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	options, session, err := a.passkey.BeginRegistration(owner, webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}))
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	ceremonyID, err := a.store.CreateAuthCeremony(r.Context(), "registration", *session)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ceremonyId": base64.RawURLEncoding.EncodeToString(ceremonyID), "publicKey": options.Response})
-}
-
-func (a *App) finishAdditionalPasskey(w http.ResponseWriter, r *http.Request) {
-	a.finishPasskeyRegistration(w, r, false)
-}
-
-func (a *App) listPasskeys(w http.ResponseWriter, r *http.Request) {
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	credentials, err := a.store.ListPasskeyCredentials(r.Context(), owner)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	items := make([]map[string]string, 0, len(credentials))
-	for _, credential := range credentials {
-		items = append(items, map[string]string{"id": base64.RawURLEncoding.EncodeToString(credential.ID), "createdAt": credential.CreatedAt, "updatedAt": credential.UpdatedAt})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"passkeys": items})
-}
-
-func (a *App) deletePasskey(w http.ResponseWriter, r *http.Request) {
-	id, err := base64.RawURLEncoding.DecodeString(r.PathValue("id"))
-	if err != nil || len(id) == 0 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid passkey id"})
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if err := a.store.DeletePasskeyCredential(r.Context(), owner, id); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *App) beginLogin(w http.ResponseWriter, r *http.Request) {
-	if a.passkey == nil {
-		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	options, session, err := a.passkey.BeginLogin(owner, webauthn.WithUserVerification(protocol.VerificationRequired))
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	ceremonyID, err := a.store.CreateAuthCeremony(r.Context(), "login", *session)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ceremonyId": base64.RawURLEncoding.EncodeToString(ceremonyID), "publicKey": options.Response})
-}
-
-func (a *App) finishLogin(w http.ResponseWriter, r *http.Request) {
-	if a.passkey == nil {
-		writeAPIError(w, &clientError{Status: http.StatusServiceUnavailable, Message: "passkey is not configured"})
-		return
-	}
-	var body struct {
-		CeremonyID string          `json:"ceremonyId"`
-		Credential json.RawMessage `json:"credential"`
-	}
-	if err := decodeJSON(w, r, &body); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	ceremonyID, err := base64.RawURLEncoding.DecodeString(body.CeremonyID)
-	if err != nil || len(ceremonyID) != 32 || len(body.Credential) == 0 {
-		writeAPIError(w, &clientError{Status: http.StatusBadRequest, Message: "invalid login response"})
-		return
-	}
-	session, err := a.store.TakeAuthCeremony(r.Context(), ceremonyID, "login")
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	owner, err := a.store.Owner(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	verification := r.Clone(r.Context())
-	verification.Body = io.NopCloser(bytes.NewReader(body.Credential))
-	verification.Header.Set("Content-Type", "application/json")
-	credential, err := a.passkey.FinishLogin(owner, session, verification)
-	if err != nil {
-		writeAPIError(w, &clientError{Status: http.StatusUnauthorized, Message: "passkey login could not be verified"})
-		return
-	}
-	if err := a.store.UpdatePasskeyCredential(r.Context(), *credential); err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	token, err := a.store.CreateAuthSession(r.Context(), owner)
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: token, Path: "/", MaxAge: 30 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: requestIsHTTPS(r)})
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
-}
-
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("thoughtglean_session"); err == nil {
 		if !a.hasOwnerSession(r) {
-			if err := a.store.DeleteAuthSession(r.Context(), cookie.Value); err != nil {
+			if err := a.store.DeleteOIDCSession(r.Context(), cookie.Value); err != nil {
 				writeAPIError(w, err)
 				return
 			}
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{Name: "thoughtglean_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.sessionIsSecure(r)})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1255,12 +990,7 @@ func (a *App) requireAuthentication(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		configured, err := a.store.HasPasskey(r.Context())
-		if err != nil {
-			writeAPIError(w, err)
-			return
-		}
-		if !configured && len(a.ownerToken) == 0 {
+		if a.oidc == nil && len(a.ownerToken) == 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1270,7 +1000,7 @@ func (a *App) requireAuthentication(next http.Handler) http.Handler {
 
 func isPublicAuthRoute(path string) bool {
 	switch path {
-	case "/api/auth/status", "/api/auth/token", "/api/auth/login/options", "/api/auth/login/verify", "/api/auth/logout":
+	case "/api/auth/status", "/api/auth/token", "/api/auth/oidc/login", "/api/auth/oidc/callback", "/api/auth/logout":
 		return true
 	default:
 		return false

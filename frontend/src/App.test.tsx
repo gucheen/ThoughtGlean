@@ -3,9 +3,15 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { EditorView } from "@codemirror/view";
 import { App } from "./App";
+import { loginWithOIDC } from "./sync";
 import { createTopic, db, now, saveNote, saveTopic, saveTopicMembership, writeLibraryMetadata, type Note } from "./db";
 
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+
+vi.mock("./sync", async importOriginal => ({
+  ...await importOriginal<typeof import("./sync")>(),
+  loginWithOIDC: vi.fn(),
+}));
 
 const noteFixture = (id: string, title: string, createdAt: string, patch: Partial<Note> = {}): Note => ({
   id, syncId: `sync-${id}`, title, content: `${title}的正文`, starred: false, revision: 1, createdAt, updatedAt: createdAt, ...patch,
@@ -21,11 +27,47 @@ beforeEach(async () => {
   });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = typeof input === "string" ? input : input.toString();
-    if (path === "/api/auth/status") return json({ enabled: false, configured: false, authenticated: true, tokenLoginEnabled: true });
+    if (path === "/api/auth/status") return json({ oidcEnabled: false, authenticated: true, tokenLoginEnabled: true });
     if (path === "/api/health") return json({ status: "ok", version: "server-test" });
     if (path === "/api/sync/snapshot") return json({ generatedAt: now(), notes: await db.notes.toArray(), sources: [], attachments: [] });
     return json({});
   }));
+});
+
+describe("identity login", () => {
+  function unauthenticatedStatus(tokenLoginEnabled: boolean) {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/auth/status") return json({ oidcEnabled: true, authenticated: false, tokenLoginEnabled });
+      return json({});
+    }));
+  }
+
+  it("starts identity login and hides the token fallback when disabled", async () => {
+    unauthenticatedStatus(false);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "使用身份账号登录" }));
+    expect(loginWithOIDC).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText("个人访问密钥")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Passkey/)).not.toBeInTheDocument();
+  });
+
+  it("offers the configured token fallback and can return to identity login", async () => {
+    unauthenticatedStatus(true);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "改用个人访问密钥" }));
+    expect(screen.getByLabelText("个人访问密钥")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "返回身份账号登录" }));
+    expect(screen.getByRole("button", { name: "使用身份账号登录" })).toBeInTheDocument();
+  });
+
+  it("shows callback errors and clears the stale offline authentication marker", async () => {
+    localStorage.setItem("thoughtglean.owner-authenticated", "1");
+    history.replaceState(null, "", "/?auth_error=oidc_failed");
+    unauthenticatedStatus(false);
+    render(<App />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("登录未完成");
+    expect(localStorage.getItem("thoughtglean.owner-authenticated")).toBeNull();
+  });
 });
 
 describe("core note interactions", () => {

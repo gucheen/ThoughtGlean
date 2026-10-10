@@ -511,10 +511,6 @@ button { cursor: pointer; }
 .diagnostic-error small { white-space: nowrap; }
 .diagnostic-error.has-error { border-color: var(--danger-border); background: var(--danger-wash); }
 .diagnostic-error.has-error strong { color: var(--danger); }
-.passkey-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
-.passkey-row span, .passkey-row small { display: block; }
-.passkey-row strong { font-size: 12px; }
-.passkey-row small { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .settings-danger { justify-content: flex-end; }
 .toast { position: fixed; z-index: 80; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 10px; max-width: min(420px, calc(100vw - 32px)); padding: 12px 14px; border: 1px solid var(--code-ink); border-radius: 9px; color: #fff; background: #172033; box-shadow: 0 12px 36px #10182835; font-size: 13px; }
 .toast span { margin-right: 4px; }

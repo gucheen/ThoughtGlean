@@ -102,33 +102,19 @@ CREATE TABLE IF NOT EXISTS note_revisions (
     PRIMARY KEY (note_id, revision)
 );
 
-CREATE TABLE IF NOT EXISTS passkey_users (
-    id BLOB PRIMARY KEY,
-    name TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS passkey_credentials (
-    id BLOB PRIMARY KEY,
-    user_id BLOB NOT NULL REFERENCES passkey_users(id) ON DELETE CASCADE,
-    credential_json BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS auth_ceremonies (
-    id BLOB PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('registration', 'login')),
-    session_json BLOB NOT NULL,
-    expires_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS auth_sessions (
+CREATE TABLE IF NOT EXISTS oidc_sessions (
     token_hash BLOB PRIMARY KEY,
-    user_id BLOB NOT NULL REFERENCES passkey_users(id) ON DELETE CASCADE,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    scope TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oidc_logins (
+    state_hash BLOB PRIMARY KEY,
+    scope TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    verifier TEXT NOT NULL,
+    return_to TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS note_sources (

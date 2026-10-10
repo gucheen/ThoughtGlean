@@ -2,16 +2,25 @@
 
 首次启动步骤见 [README](../README.md#部署)。Compose 使用 GHCR 的 `thoughtglean-server` 和 `thoughtglean-web` 镜像，当前发布平台为 `linux/amd64`。
 
-## 域名与 HTTPS
+## 域名、HTTPS 与 OIDC
 
-默认仅监听宿主机 `127.0.0.1:8080`。正式部署时，用反向代理提供 HTTPS，并在 `.env` 设置实际访问域名：
+生产环境通过 Caddy、Nginx 或 Cloudflare Tunnel 提供 HTTPS，并在身份服务中创建 confidential OIDC client，启用 Authorization Code 和 PKCE S256。配置示例：
 
-```dotenv
-THOUGHTGLEAN_PASSKEY_RP_ID=notes.example.com
-THOUGHTGLEAN_PASSKEY_ORIGIN=https://notes.example.com
+```env
+THOUGHTGLEAN_OIDC_ISSUER=https://identity.example.com/realms/personal
+THOUGHTGLEAN_OIDC_CLIENT_ID=thoughtglean
+THOUGHTGLEAN_OIDC_CLIENT_SECRET=身份服务生成的客户端密钥
+THOUGHTGLEAN_OIDC_REDIRECT_URL=https://notes.example.com/api/auth/oidc/callback
+THOUGHTGLEAN_OIDC_OWNER_SUBJECT=你的账号在此客户端中的sub
 ```
 
-RP ID 不含协议或端口，Origin 包含协议及非默认端口。修改域名后需重新注册 Passkey；本机使用默认地址 `http://localhost:8080`。手机通过局域网普通 HTTP 访问时无法使用 Passkey。
+Issuer 填写身份服务发布的 issuer 地址，服务端会读取其 `/.well-known/openid-configuration`。回调地址必须与身份服务登记的地址完全一致，路径固定为 `/api/auth/oidc/callback`。本地 Docker 使用 `http://localhost:8080/api/auth/oidc/callback`，Vite 开发使用 `http://localhost:5173/api/auth/oidc/callback`。除回环地址外，Issuer 和回调地址必须使用 HTTPS。
+
+`OWNER_SUBJECT` 是该账号 ID Token 的 `sub` claim，请从身份服务的账号信息或客户端 Token 预览中取得；它不一定等于用户名、邮箱或管理后台的用户 ID。只有这一账号可以访问原有笔记，其他账号会被拒绝。更改 issuer、client ID 或 owner subject 会使现有 OIDC 会话失效。
+
+五项 OIDC 配置必须一起填写。配置缺失或 discovery 失败时，服务端会拒绝启动；启动和登录时服务端必须能够访问身份服务。不使用 OIDC 时，将这五项全部留空并配置个人访问密钥。密钥可由 `openssl rand -hex 32` 生成；启用 OIDC 时密钥可以留空，也可以保留为备用入口。
+
+从 Passkey 版本升级后，记录和图片保留，原 Passkey 登录及管理入口移除，旧 Passkey 会话不再接受，需要重新登录。浏览器仍保留本机离线数据；首次在线登录成功后恢复同步。退出登录会撤销拾念当前设备的 OIDC 会话，身份服务中的会话由身份服务管理。
 
 ## 配置
 
@@ -19,11 +28,14 @@ RP ID 不含协议或端口，Origin 包含协议及非默认端口。修改域�
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `THOUGHTGLEAN_OWNER_TOKEN` | 必填 | 至少 32 个字符的登录密钥，妥善保存供首次登录和恢复访问 |
+| `THOUGHTGLEAN_OWNER_TOKEN` | 空 | 可选备用密钥，至少 32 个字符；未配置 OIDC 时必填 |
 | `THOUGHTGLEAN_HTTP_BIND` | `127.0.0.1` | 宿主机监听地址；需直接对外监听时改为 `0.0.0.0` |
 | `THOUGHTGLEAN_HTTP_PORT` | `8080` | 宿主机端口 |
-| `THOUGHTGLEAN_PASSKEY_RP_ID` | `localhost` | Passkey 域名 |
-| `THOUGHTGLEAN_PASSKEY_ORIGIN` | `http://localhost:8080` | 浏览器访问的完整 Origin |
+| `THOUGHTGLEAN_OIDC_ISSUER` | 空 | 身份服务 issuer 地址 |
+| `THOUGHTGLEAN_OIDC_CLIENT_ID` | 空 | OIDC 客户端 ID |
+| `THOUGHTGLEAN_OIDC_CLIENT_SECRET` | 空 | OIDC 客户端密钥，仅存于服务端 |
+| `THOUGHTGLEAN_OIDC_REDIRECT_URL` | 空 | 完整回调地址，路径为 `/api/auth/oidc/callback` |
+| `THOUGHTGLEAN_OIDC_OWNER_SUBJECT` | 空 | 唯一允许访问笔记的账号的 `sub` |
 | `THOUGHTGLEAN_DATA_PATH` | `./data` | 数据挂载目录 |
 | `THOUGHTGLEAN_BACKUP_PATH` | `./backups` | 备份挂载目录，建议使用另一块磁盘并同步到异地 |
 | `THOUGHTGLEAN_BACKUP_INTERVAL` | `24h` | 备份间隔，至少 `1m`；`0` 禁用 |
@@ -31,7 +43,7 @@ RP ID 不含协议或端口，Origin 包含协议及非默认端口。修改域�
 
 目录默认值来自 `.env.example`。路径留空时改用 Docker 命名卷；绑定目录时，数据与备份目录应由同一 UID 持有，无需设置 `777` 权限。数据和备份包含明文内容，应限制访问。
 
-直接运行 Go 服务时，可设置 `THOUGHTGLEAN_ADDR`（默认 `127.0.0.1:8080`）、`THOUGHTGLEAN_DATA_DIR`（默认 `./data`）和 `THOUGHTGLEAN_BACKUP_DIR`（默认 `<数据目录>/backups`）。Passkey Origin 默认是本地前端地址 `http://localhost:5173`。
+直接运行 Go 服务时，可设置 `THOUGHTGLEAN_ADDR`（默认 `127.0.0.1:8080`）、`THOUGHTGLEAN_DATA_DIR`（默认 `./data`）和 `THOUGHTGLEAN_BACKUP_DIR`（默认 `<数据目录>/backups`）。OIDC 回调地址需按浏览器访问的前端地址配置。
 
 ## 更新与停止
 

@@ -3,10 +3,8 @@ import { db, newID, type Attachment, type Note, type NoteMaterialLink, type Note
 type ServerAttachment = Omit<Attachment, "blob"> & { contentHash?: string };
 type Snapshot = { generatedAt: string; notes: Note[]; sources: NoteSource[]; materialLinks?: NoteMaterialLink[]; verifications?: NoteVerification[]; topics?: Topic[]; topicMemberships?: TopicMembership[]; attachments: ServerAttachment[] };
 
-export type AuthStatus = { enabled: boolean; configured: boolean; authenticated: boolean; tokenLoginEnabled: boolean };
-export type PasskeyInfo = { id: string; createdAt: string; updatedAt: string };
+export type AuthStatus = { oidcEnabled: boolean; authenticated: boolean; tokenLoginEnabled: boolean };
 export type ServerInfo = { status: string; version: string };
-type CeremonyOptions = { ceremonyId: string; publicKey: Record<string, unknown> };
 
 async function api(path: string, init?: RequestInit) {
   const response = await fetch(path, init);
@@ -18,7 +16,7 @@ async function api(path: string, init?: RequestInit) {
 }
 
 export async function authStatus(): Promise<AuthStatus> {
-  const response = await fetch("/api/auth/status");
+  const response = await fetch("/api/auth/status", { cache: "no-store" });
   if (!response.ok) throw new Error("无法连接服务器");
   return response.json() as Promise<AuthStatus>;
 }
@@ -37,94 +35,11 @@ export async function logout() {
   await api("/api/auth/logout", { method: "POST" });
 }
 
-const decodeBase64URL = (value: string) => {
-  const normalized = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4);
-  return Uint8Array.from(atob(normalized), character => character.charCodeAt(0));
-};
-
-const encodeBase64URL = (value: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(value))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-
-function creationOptions(value: Record<string, unknown>): PublicKeyCredentialCreationOptions {
-  const user = value.user as Record<string, unknown>;
-  const excludeCredentials = value.excludeCredentials as Array<Record<string, unknown>> | undefined;
-  return {
-    ...value,
-    challenge: decodeBase64URL(value.challenge as string),
-    user: { ...user, id: decodeBase64URL(user.id as string) },
-    excludeCredentials: excludeCredentials?.map(item => ({ ...item, id: decodeBase64URL(item.id as string) })),
-  } as unknown as PublicKeyCredentialCreationOptions;
-}
-
-function requestOptions(value: Record<string, unknown>): PublicKeyCredentialRequestOptions {
-  const allowCredentials = value.allowCredentials as Array<Record<string, unknown>> | undefined;
-  return {
-    ...value,
-    challenge: decodeBase64URL(value.challenge as string),
-    allowCredentials: allowCredentials?.map(item => ({ ...item, id: decodeBase64URL(item.id as string) })),
-  } as unknown as PublicKeyCredentialRequestOptions;
-}
-
-function credentialJSON(credential: PublicKeyCredential) {
-  const response = credential.response;
-  if (response instanceof AuthenticatorAttestationResponse) {
-    return {
-      id: credential.id, rawId: encodeBase64URL(credential.rawId), type: credential.type,
-      clientExtensionResults: credential.getClientExtensionResults(),
-      response: {
-        clientDataJSON: encodeBase64URL(response.clientDataJSON),
-        attestationObject: encodeBase64URL(response.attestationObject),
-        transports: response.getTransports?.() ?? [],
-      },
-    };
-  }
-  const assertion = response as AuthenticatorAssertionResponse;
-  return {
-    id: credential.id, rawId: encodeBase64URL(credential.rawId), type: credential.type,
-    clientExtensionResults: credential.getClientExtensionResults(),
-    response: {
-      clientDataJSON: encodeBase64URL(assertion.clientDataJSON),
-      authenticatorData: encodeBase64URL(assertion.authenticatorData),
-      signature: encodeBase64URL(assertion.signature),
-      userHandle: assertion.userHandle ? encodeBase64URL(assertion.userHandle) : null,
-    },
-  };
-}
-
-function passkeyError(error: unknown): Error {
-  if (error instanceof DOMException && error.name === "NotAllowedError") return new Error("Passkey 操作已取消或超时");
-  if (error instanceof Error) return error;
-  return new Error("Passkey 操作失败");
-}
-
-export async function registerPasskey(additional: boolean) {
-  if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("当前浏览器不支持 Passkey");
-  try {
-    const optionsResponse = await api(additional ? "/api/auth/passkeys/options" : "/api/auth/register/options", additional ? { method: "POST" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "ThoughtGlean owner" }) });
-    const options = await optionsResponse.json() as CeremonyOptions;
-    const credential = await navigator.credentials.create({ publicKey: creationOptions(options.publicKey) }) as PublicKeyCredential | null;
-    if (!credential) throw new Error("没有创建 Passkey");
-    await api(additional ? "/api/auth/passkeys/verify" : "/api/auth/register/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ceremonyId: options.ceremonyId, credential: credentialJSON(credential) }) });
-  } catch (error) { throw passkeyError(error); }
-}
-
-export async function loginWithPasskey() {
-  if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("当前浏览器不支持 Passkey");
-  try {
-    const optionsResponse = await api("/api/auth/login/options", { method: "POST" });
-    const options = await optionsResponse.json() as CeremonyOptions;
-    const credential = await navigator.credentials.get({ publicKey: requestOptions(options.publicKey) }) as PublicKeyCredential | null;
-    if (!credential) throw new Error("没有取得 Passkey");
-    await api("/api/auth/login/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ceremonyId: options.ceremonyId, credential: credentialJSON(credential) }) });
-  } catch (error) { throw passkeyError(error); }
-}
-
-export async function listPasskeys(): Promise<PasskeyInfo[]> {
-  const response = await api("/api/auth/passkeys");
-  return ((await response.json()) as { passkeys: PasskeyInfo[] }).passkeys;
-}
-
-export async function deletePasskey(id: string) {
-  await api(`/api/auth/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" });
+export function loginWithOIDC() {
+  const search = new URLSearchParams(window.location.search);
+  search.delete("auth_error");
+  const returnTo = window.location.pathname + (search.size ? `?${search}` : "") + window.location.hash;
+  window.location.assign(`/api/auth/oidc/login?${new URLSearchParams({ returnTo })}`);
 }
 
 export class ServerSync {

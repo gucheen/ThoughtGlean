@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 func testStore(t *testing.T) *Store {
@@ -41,56 +39,6 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 		if got != check.want {
 			t.Errorf("PRAGMA %s = %q, want %q", check.pragma, got, check.want)
 		}
-	}
-}
-
-func TestPasskeyOwnerAndCredentialStorage(t *testing.T) {
-	noteStore := testStore(t)
-	ctx := context.Background()
-	configured, err := noteStore.HasPasskey(ctx)
-	if err != nil || configured {
-		t.Fatalf("initial passkey configured=%v err=%v", configured, err)
-	}
-	owner, err := noteStore.CreateOwner(ctx, "我的拾念")
-	if err != nil || len(owner.ID) != 32 {
-		t.Fatalf("create owner=%#v err=%v", owner, err)
-	}
-	credential := webauthn.Credential{ID: []byte("credential-id")}
-	if err := noteStore.AddPasskeyCredential(ctx, owner, credential); err != nil {
-		t.Fatal(err)
-	}
-	if err := noteStore.DeletePasskeyCredential(ctx, owner, credential.ID); err == nil {
-		t.Fatal("final passkey was removed")
-	}
-	secondCredential := webauthn.Credential{ID: []byte("second-credential-id")}
-	if err := noteStore.AddPasskeyCredential(ctx, owner, secondCredential); err != nil {
-		t.Fatal(err)
-	}
-	if err := noteStore.DeletePasskeyCredential(ctx, owner, credential.ID); err != nil {
-		t.Fatal(err)
-	}
-	configured, err = noteStore.HasPasskey(ctx)
-	if err != nil || !configured {
-		t.Fatalf("stored passkey configured=%v err=%v", configured, err)
-	}
-	loaded, err := noteStore.Owner(ctx)
-	if err != nil || loaded.Name != owner.Name || len(loaded.Credentials) != 1 || string(loaded.Credentials[0].ID) != "second-credential-id" {
-		t.Fatalf("loaded owner=%#v err=%v", loaded, err)
-	}
-	token, err := noteStore.CreateAuthSession(ctx, loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	valid, err := noteStore.ValidateAuthSession(ctx, token)
-	if err != nil || !valid {
-		t.Fatalf("session valid=%v err=%v", valid, err)
-	}
-	if err := noteStore.DeleteAuthSession(ctx, token); err != nil {
-		t.Fatal(err)
-	}
-	valid, err = noteStore.ValidateAuthSession(ctx, token)
-	if err != nil || valid {
-		t.Fatalf("deleted session valid=%v err=%v", valid, err)
 	}
 }
 
