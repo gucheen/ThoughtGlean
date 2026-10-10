@@ -61,4 +61,4 @@ pnpm dev
 
 ## 页面设计
 
-界面遵循 [Notion Style 设计规则](docs/notion-design.md)，包括系统字体、米色侧栏、内容块、键盘焦点和交互约束。后续页面和组件调整沿用该规则。
+界面沿用拾念自己的设计：白色画布、蓝色主操作、紧凑导航和输入优先的时间流，支持深色模式与移动端。后续调整以 [产品设计原则](docs/product-principles.md) 为准；[Notion 借鉴分析](docs/notion-design.md) 说明可吸收的交互和排版方法，不作为整套换肤规范。

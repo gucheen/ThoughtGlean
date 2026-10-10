@@ -44,7 +44,7 @@ export function SpacesView({ topics, selectedTopic, requestedTopicID, notes, all
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const listedTopics = topics.filter(topic => terms.every(term => topic.name.toLocaleLowerCase().includes(term)));
   const groups = [{ title: "置顶", items: notes.filter(note => pinnedIDs.has(note.id)) }, { title: "记录", items: notes.filter(note => !pinnedIDs.has(note.id)) }];
-  const card = (topic: Topic) => <button key={topic.id} className="topic-card group" onClick={() => onOpenTopic(topic.id)}><span><strong>{topic.name}</strong><small>{memberships.filter(item => item.topicId === topic.id).length} 条记录{topic.archivedAt ? " · 已归档" : topic.hiddenFromDaily ? " · 已从日常收起" : ""}</small></span><i aria-hidden="true">→</i></button>;
+  const card = (topic: Topic) => <button key={topic.id} className="topic-card" onClick={() => onOpenTopic(topic.id)}><span><strong>{topic.name}</strong><small>{memberships.filter(item => item.topicId === topic.id).length} 条记录{topic.archivedAt ? " · 已归档" : topic.hiddenFromDaily ? " · 已从日常收起" : ""}</small></span><i aria-hidden="true">→</i></button>;
 
   if (requestedTopicID && !selectedTopic) return <section className="empty-state"><h1>空间暂不可用</h1><p>它可能尚未同步到本机，或已被删除。</p><button className="button button-secondary" onClick={() => onOpenTopic()}>返回空间列表</button></section>;
 
@@ -79,7 +79,7 @@ export function SpacesView({ topics, selectedTopic, requestedTopicID, notes, all
     {selectedTopic ? <>
       {children}
       <div className="topic-groups">{groups.map(({ title, items }) => {
-        return items.length > 0 && <section key={title} aria-label={title}><h2>{title}<small>{items.length}</small></h2><div className="topic-note-list">{items.map(note => <article key={note.id} className={`topic-note-card group ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id}>
+        return items.length > 0 && <section key={title} aria-label={title}><h2>{title}<small>{items.length}</small></h2><div className="topic-note-list">{items.map(note => <article key={note.id} className={`topic-note-card ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id}>
           <button className="topic-note-open" onClick={() => onOpenNote(note.id)}><strong>{note.title}</strong><p>{note.content.slice(0, 240)}</p></button>
           {!selectedTopic.archivedAt && <footer><button className="text-button" disabled={busy} onClick={() => void run(async () => { await saveTopicMembership(selectedTopic, note, { pinned: !pinnedIDs.has(note.id) }); })}>{pinnedIDs.has(note.id) ? "取消置顶" : "置顶"}</button><button className="text-button" disabled={busy} onClick={() => void run(async () => { await saveTopicMembership(selectedTopic, note, { pinned: false, deletedAt: now() }); })}>移出空间</button></footer>}
         </article>)}</div></section>;

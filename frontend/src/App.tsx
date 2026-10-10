@@ -54,17 +54,6 @@ function routePath(route: Route) {
   return route.noteID ? `/notes/${encodeURIComponent(route.noteID)}` : viewPaths[route.view];
 }
 
-function NavIcon({ name }: { name: string }) {
-  const paths: Record<string, string> = {
-    recent: "M4 4h12v12H4z M7 8h6 M7 11h4",
-    starred: "m10 2 2.4 4.8 5.3.8-3.9 3.8.9 5.4-4.7-2.5-4.7 2.5.9-5.4L2.3 7.6l5.3-.8Z",
-    all: "M6 3h10v12H6z M3 6v11h10 M9 7h4 M9 10h4",
-    topics: "M2.5 5h6l2-2h7v14h-15z M2.5 8h15",
-    settings: "M8 2h4l.6 2.2 2 .9 2-.6 2 3.5-1.5 1.5v2l1.5 1.5-2 3.5-2-.6-2 .9L12 19H8l-.6-2.2-2-.9-2 .6-2-3.5L3 11.5v-2L1.5 8l2-3.5 2 .6 2-.9Z M13 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0",
-  };
-  return <span className="nav-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 21" fill="none"><path d={paths[name] ?? paths.topics} stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" strokeLinecap="round" /></svg></span>;
-}
-
 export function App() {
   const initialRoute = useMemo(() => readRoute(), []);
   const [view, setView] = useState<View>(initialRoute.view);
@@ -161,10 +150,13 @@ export function App() {
   }, [query]);
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey && !target?.closest("input, textarea, [contenteditable=true]")) {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target?.isContentEditable || target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return;
+      if (event.key === "/") {
         event.preventDefault(); searchInput.current?.focus();
-      } else if (event.key.toLocaleLowerCase() === "n" && !event.metaKey && !event.ctrlKey && !event.altKey && !target?.closest("input, textarea, [contenteditable=true]")) {
+      } else if (!event.shiftKey && event.key.toLocaleLowerCase() === "n") {
         event.preventDefault(); document.querySelector<HTMLButtonElement>(".top-new")?.click();
       }
     };
@@ -254,6 +246,12 @@ export function App() {
   const topicVisible = selectedTopic ? visible.filter(note => membershipByNote.has(note.id)).sort((left, right) => Number(membershipByNote.get(right.id)?.pinned) - Number(membershipByNote.get(left.id)?.pinned) || right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)) : [];
   const keyboardNotes = view === "topics" ? topicVisible : visible;
   const keyboardSelectedID = query.trim() && keyboardNotes.length ? keyboardNotes[Math.min(searchSelection, keyboardNotes.length - 1)]?.id : undefined;
+  const searchScope = selectedTopic ? `空间：${selectedTopic.name}` : viewTitles[view];
+  useEffect(() => {
+    if (keyboardSelectedID && document.activeElement === searchInput.current) {
+      Array.from(document.querySelectorAll<HTMLElement>("[data-note-id]")).find(element => element.dataset.noteId === keyboardSelectedID)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [keyboardSelectedID]);
   useEffect(() => {
     if (!keyboardSelectedID) return;
     document.querySelector(`[data-note-id="${CSS.escape(keyboardSelectedID)}"]`)?.scrollIntoView({ block: "nearest" });
@@ -477,13 +475,14 @@ export function App() {
   };
 
   return <div className={`app-shell ${selected && editing ? "is-detail-editing" : ""}`}>
-    <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong><small>ThoughtGlean</small></span></button><div className="topbar-main"><label className="search-box"><span className="search-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.25" /><path d="m12 12 5 5" stroke="currentColor" strokeWidth="1.25" /></svg></span><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
-      if (event.key === "ArrowDown" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current + 1) % keyboardNotes.length); }
-      else if (event.key === "ArrowUp" && keyboardNotes.length) { event.preventDefault(); setSearchSelection(current => (current - 1 + keyboardNotes.length) % keyboardNotes.length); }
+    <header className="topbar"><button className="brand" onClick={() => showView("recent")}><span className="brand-mark" /><span className="brand-copy"><strong>拾念</strong></span></button><div className="topbar-main"><label className="search-box"><span className="search-icon" aria-hidden="true" /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
+      if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+      if (event.key === "ArrowDown" && keyboardSelectedID) { event.preventDefault(); setSearchSelection(current => (current + 1) % keyboardNotes.length); }
+      else if (event.key === "ArrowUp" && keyboardSelectedID) { event.preventDefault(); setSearchSelection(current => (current - 1 + keyboardNotes.length) % keyboardNotes.length); }
       else if (event.key === "Enter" && keyboardSelectedID) { event.preventDefault(); showNote(keyboardSelectedID); }
-      else if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); }
-    }} aria-label="搜索记录或空间" type="search" placeholder={selectedTopic ? `搜索「${selectedTopic.name}」内的记录…` : view === "topics" ? "查找空间…" : view === "recent" ? "搜索日常记录…" : "找找以前记过的…"} /><kbd>↑↓</kbd><kbd>↵</kbd></label><button className="button button-primary top-new" aria-label="新记录" onClick={() => { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); if (selectedTopic && !selectedTopic.archivedAt) showTopic(selectedTopic.id); else showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }}><span aria-hidden="true">＋</span><span className="button-label">新记录</span></button></div></header>
-    <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "日常"], ["starred", "星标"], ["all", "全部记录"], ["topics", "空间"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key && (key !== "topics" || !topicID) ? "active" : ""}`} aria-current={view === key && (key !== "topics" || !topicID) ? "page" : undefined} onClick={() => showView(key)}><NavIcon name={key} />{label}</button>)}</nav><nav className="topic-nav-section" aria-label="常用空间">{topics.some(topic => !topic.archivedAt) && <header>常用空间</header>}{topics.filter(topic => !topic.archivedAt).map(topic => <button key={topic.id} className={`nav-item ${topicID === topic.id ? "active" : ""}`} onClick={() => showTopic(topic.id)}><NavIcon name="topics" /><span>{topic.name}</span></button>)}</nav>{pendingShares.length > 0 && <button className="nav-item share-review-nav" onClick={() => setShareReviewOpen(true)}>收到的分享</button>}<button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}><NavIcon name="settings" />设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}</span></div></aside>
+      else if (event.key === "Escape") { event.preventDefault(); if (query) setQuery(""); else searchInput.current?.blur(); }
+    }} aria-label="搜索记录或空间" aria-describedby="search-help" title={`搜索范围：${searchScope}（/ 聚焦）`} type="search" placeholder={selectedTopic ? `搜索「${selectedTopic.name}」内的记录…` : view === "topics" ? "查找空间…" : view === "recent" ? "搜索日常记录…" : "找找以前记过的…"} /><span id="search-help" className="search-help">{keyboardSelectedID ? <><kbd>↑↓</kbd> 选择 <kbd>↵</kbd> 打开</> : <><kbd>/</kbd> 搜索</>}</span></label><button className="button button-primary top-new" aria-label="新记录" aria-keyshortcuts="n" title="新记录（N）" onClick={() => { setQuery(""); setSearchFilter("all"); setTimeFilter("any"); if (selectedTopic && !selectedTopic.archivedAt) showTopic(selectedTopic.id); else showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }}><span aria-hidden="true">＋</span><span className="button-label">新记录</span></button></div></header>
+    <div className="workspace"><aside className="sidebar"><nav className="primary-nav">{([ ["recent", "日常"], ["starred", "星标"], ["all", "全部记录"], ["topics", "空间"] ] as [View, string][]).map(([key, label]) => <button key={key} className={`nav-item ${view === key && (key !== "topics" || !topicID) ? "active" : ""}`} aria-current={view === key && (key !== "topics" || !topicID) ? "page" : undefined} onClick={() => showView(key)}>{label}</button>)}</nav><nav className="topic-nav-section" aria-label="常用空间">{topics.filter(topic => !topic.archivedAt).map(topic => <button key={topic.id} className={`nav-item ${topicID === topic.id ? "active" : ""}`} onClick={() => showTopic(topic.id)}><span>{topic.name}</span></button>)}</nav>{pendingShares.length > 0 && <button className="nav-item share-review-nav" onClick={() => setShareReviewOpen(true)}>收到的分享</button>}<button className="nav-item settings-nav" onClick={() => setSettingsOpen(true)}>设置</button><div className="storage-note"><span className="status-dot" /><span>{syncStatus}</span></div></aside>
       <main className="main-content">{selected ? <Detail key={selected.id} note={selected} notes={notes} source={source} materialLinks={allMaterialLinks} verifications={verificationsByNote.get(selected.id) ?? []} topics={topics} topicMemberships={activeTopicMemberships.filter(item => item.noteId === selected.id)} attachments={attachments} editing={editing} setEditing={setEditing} onBack={() => view === "topics" ? showTopic(topicID) : showView(view)} onSelect={showNote} onOpenTopic={showTopic} onContinue={() => { setContinuedFromID(selected.id); if (!draft) setDraftTopicID(selectedTopic?.id); setQuery(""); setSearchFilter("all"); setTimeFilter("any"); if (selectedTopic && !selectedTopic.archivedAt) showTopic(selectedTopic.id); else showView("recent"); requestAnimationFrame(() => captureInput.current?.focus()); }} saveSource={saveSource} update={update} remove={remove} restore={restore} addImages={addImages} /> : selectedID && loadedNotes ? <RouteNotFound onBack={() => view === "topics" ? showTopic(topicID) : showView(view, true)} /> : view === "topics" ? <SpacesView key={topicID ?? "overview"} topics={topics} selectedTopic={selectedTopic} requestedTopicID={topicID} notes={topicVisible} allNotes={notes} memberships={activeTopicMemberships} query={query} keyboardSelectedID={keyboardSelectedID} onOpenTopic={showTopic} onOpenNote={showNote} onChange={() => void syncNow()}>{!selectedTopic?.archivedAt && <QuickCapture {...captureProps} />}</SpacesView> : <Library view={view} notes={visible} sourceByNote={sourceByNote} query={query} setQuery={setQuery} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} searchFilter={searchFilter} setSearchFilter={setSearchFilter} timeFilter={timeFilter} setTimeFilter={setTimeFilter} conflictCount={conflictNotes.length} openFirstConflict={() => conflictNotes[0] && showNote(conflictNotes[0].id)} {...captureProps} update={update} restore={restore} />}</main></div>
     {shareReviewOpen && pendingShares[0] && <ShareReview key={pendingShares[0].id} item={pendingShares[0]} onClose={() => setShareReviewOpen(false)} onDiscard={removePendingShare} onMoveToCapture={moveSharedToCapture} onSave={saveSharedNote} />}
     {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
@@ -690,7 +689,7 @@ function QuickCapture({ allNotes, draft, draftStatus, suggestedSource, captureSo
   }, [captureInput]);
 
   const continuationParent = allNotes.find(note => note.id === continuedFromID);
-  return <form className={`capture-card group ${/^\s*#\s+\S/.test(draft) ? "has-title-line" : ""}`} onSubmit={event => { event.preventDefault(); capture(); }}>
+  return <form className={`capture-card ${/^\s*#\s+\S/.test(draft) ? "has-title-line" : ""}`} onSubmit={event => { event.preventDefault(); capture(); }}>
       {continuedFromID && <div className="continuation-chip"><span>续写自：</span>{continuationParent ? <button className="continuation-source" type="button" onClick={() => open(continuationParent.id)}>{continuationParent.title}{continuationParent.deletedAt ? "（已在回收站）" : ""}</button> : <span>原记录暂不可用</span>}<button className="continuation-cancel" type="button" aria-label="取消续写" onClick={clearContinuation}>×</button></div>}
       {captureSource && <div className="source-suggestion accepted"><span>来源：{captureSource}</span><button type="button" onClick={removeSource}>移除</button></div>}
       <textarea ref={captureInput} aria-label="随手记" id="captureInput" value={draft} onChange={event => setDraft(event.target.value)} onPaste={paste} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); capture(); } }} placeholder={continuedFromID ? "继续写…" : "写下想法…"} />
@@ -724,8 +723,9 @@ function Library({ view, notes, allNotes, sourceByNote, query, setQuery, searchH
     groups.set(key, [...(groups.get(key) ?? []), note]);
   }
   return <section className="library-view">
-    <div className="library-controls"><header className="view-heading"><h1>{viewTitles[view]}</h1><p>{notes.length} 条记录</p></header><button className="text-button" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>{searchFilter !== "all" || timeFilter !== "any" ? "筛选中" : "筛选"}</button></div>
     {view !== "trash" && <QuickCapture {...{ allNotes, draft, draftStatus, suggestedSource, captureSource, acceptSource, dismissSource, removeSource, continuedFromID, setDraft, clearContinuation, capture, captureBusy, captureInput, paste, open, destination, moveToDaily }} />}
+    <div className="library-controls"><header className="view-heading"><h1>{viewTitles[view]}</h1></header><button className="text-button" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>{searchFilter !== "all" || timeFilter !== "any" ? "筛选中" : "筛选"}</button></div>
+    {query.trim() && <p className="search-context" role="status">在{viewTitles[view]}中找到 {notes.length} 条记录</p>}
     {filtersOpen && <div className="search-filter-rows"><div className="search-filters" aria-label="内容筛选">{([['all', '全部'], ['images', '图片'], ['conflicts', '冲突']] as [SearchFilter, string][]).map(([key, label]) => <button key={key} aria-pressed={searchFilter === key} onClick={() => setSearchFilter(key)}>{label}</button>)}</div><div className="search-filters time-filters" aria-label="时间筛选">{([['any', '不限时间'], ['today', '今天'], ['week', '最近一周'], ['month', '最近一月']] as [TimeFilter, string][]).map(([key, label]) => <button key={key} aria-pressed={timeFilter === key} onClick={() => setTimeFilter(key)}>{label}</button>)}</div></div>}
     {conflictCount > 0 && searchFilter !== "conflicts" && view !== "trash" && <aside className="conflict-notice"><span><strong>{conflictCount} 条同步冲突待处理</strong><small>原版本和另一设备版本均已保留。</small></span><button className="button button-secondary" onClick={openFirstConflict}>查看</button></aside>}
     {notes.length ? <div className="timeline">{[...groups].map(([key, group]) => <DateGroup key={key} dateKey={key} notes={group} noteByID={noteByID} sourceByNote={sourceByNote} continuationCounts={continuationCounts} query={query} searchHints={searchHints} keyboardSelectedID={keyboardSelectedID} view={view} open={open} update={update} restore={restore} />)}</div> : <section className="empty-state"><h2>{view === "trash" ? "回收站是空的" : view === "starred" ? "还没有星标" : query || searchFilter !== "all" || timeFilter !== "any" ? "没有匹配的记录" : "还没有记录"}</h2><p>{view === "trash" ? "删除的记录会保留在这里，可随时恢复。" : query || searchFilter !== "all" || timeFilter !== "any" ? "换个关键词或筛选条件试试。" : "写下第一条内容。"}</p></section>}
@@ -745,7 +745,7 @@ function DateGroup({ dateKey, notes, noteByID, sourceByNote, continuationCounts,
     const command = query ? matchingCommand(note.content, query) : undefined;
     const lines = note.content.trimStart().split(/\r?\n/);
     const preview = !query && lines[0].trim() === note.title ? lines.slice(1).join("\n").trimStart() : excerptForSearch(note.content, query);
-    return <article className={`note-row group ${command ? "has-command-match" : ""} ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id} key={note.id}>
+    return <article className={`note-row ${command ? "has-command-match" : ""} ${keyboardSelectedID === note.id ? "keyboard-selected" : ""}`} data-note-id={note.id} key={note.id}>
       <button className="note-row-open" onClick={() => open(note.id)}>
         <time className="note-time">{new Date(note.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
         <span className="note-row-main">
@@ -785,7 +785,7 @@ function Detail({ note, notes, source, materialLinks, verifications, topics, top
   const [mergingConflict, setMergingConflict] = useState(false);
   const [sourceMode, setSourceMode] = useState(false);
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
-  const [mobileNoteActionsOpen, setMobileNoteActionsOpen] = useState(false);
+  const [noteActionsOpen, setNoteActionsOpen] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [editError, setEditError] = useState("");
   const titleEditor = useRef<HTMLInputElement>(null);
@@ -798,6 +798,7 @@ function Detail({ note, notes, source, materialLinks, verifications, topics, top
   const draftWrites = useRef(Promise.resolve());
   const editorTools = useRef<HTMLDivElement>(null);
   const noteActions = useRef<HTMLDivElement>(null);
+  const noteActionsToggle = useRef<HTMLButtonElement>(null);
   const editDraftKey = `draft.note.${note.syncId}`;
   const conflictParent = isConflict(note) && note.continuedFromId ? notes.find(item => item.id === note.continuedFromId) : undefined;
   useEffect(() => {
@@ -832,13 +833,13 @@ function Detail({ note, notes, source, materialLinks, verifications, topics, top
     return () => window.removeEventListener("pointerdown", close);
   }, [mobileToolsOpen]);
   useEffect(() => {
-    if (!mobileNoteActionsOpen) return;
+    if (!noteActionsOpen) return;
     const close = (event: PointerEvent) => {
-      if (event.target instanceof Node && !noteActions.current?.contains(event.target)) setMobileNoteActionsOpen(false);
+      if (event.target instanceof Node && !noteActions.current?.contains(event.target)) setNoteActionsOpen(false);
     };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
-  }, [mobileNoteActionsOpen]);
+  }, [noteActionsOpen]);
   useLayoutEffect(() => {
     if (editing) editor.current?.focus();
   }, [editing]);
@@ -896,7 +897,7 @@ function Detail({ note, notes, source, materialLinks, verifications, topics, top
       initialViewport.current = content === note.content && window.scrollY > 0 ? readingViewport(reader.current) : undefined;
       if (!initialSelection.current && initialViewport.current) initialSelection.current = { anchor: initialViewport.current.position, head: initialViewport.current.position };
       readingScroll.current = window.scrollY;
-      setSourceMode(false); setMobileNoteActionsOpen(false); setEditError(""); setEditing(true);
+      setSourceMode(false); setNoteActionsOpen(false); setEditError(""); setEditing(true);
     }
   };
   const beginConflictMerge = () => {
@@ -916,7 +917,20 @@ function Detail({ note, notes, source, materialLinks, verifications, topics, top
     await update(note, { deletedAt: now() });
     onSelect(conflictParent.id);
   };
-  return <section className="detail-view"><header className={`note-toolbar ${editing ? "is-editing" : ""}`}><button className="text-button note-back" onClick={onBack}>← 返回</button><div className="note-toolbar-actions">{editing && <div className="edit-actions">{editError && <span className="inline-error" role="alert">{editError}</span>}<span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" disabled={saveBusy} onClick={cancel}>取消</button><button className="button button-primary" disabled={saveBusy} onClick={() => void save()}>{saveBusy ? "保存中…" : mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div>}{!editing ? <>{!note.deletedAt && !conflictParent && <button ref={editButton} className="button button-primary note-edit-action" disabled={!editDraftLoaded} aria-keyshortcuts="e" title="编辑（E）" onMouseDown={event => event.preventDefault()} onClick={beginEditing}>编辑<kbd className="button-shortcut" aria-hidden="true">E</kbd></button>}<div ref={noteActions} className="mobile-note-actions"><button className="text-button mobile-note-actions-toggle" aria-expanded={mobileNoteActionsOpen} aria-controls="mobile-note-actions-menu" onClick={() => setMobileNoteActionsOpen(value => !value)}>更多</button><div id="mobile-note-actions-menu" className="mobile-note-actions-menu" data-open={mobileNoteActionsOpen} role="group" aria-label="更多操作" onClick={() => setMobileNoteActionsOpen(false)}><span className="note-copy-action"><CopyButton text={note.content} /></span><button className="text-button note-secondary-action" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button note-secondary-action" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger note-secondary-action" onClick={() => void remove(note)}>移到回收站</button>}</div></div></> : <span className="note-desktop-secondary"><button className="text-button note-secondary-action" onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>{note.deletedAt ? <button className="text-button note-secondary-action" onClick={() => void restore(note)}>恢复</button> : <button className="text-button danger note-secondary-action" onClick={() => void remove(note)}>移到回收站</button>}</span>}</div></header>
+  return <section className="detail-view"><header className={`note-toolbar ${editing ? "is-editing" : ""}`}><button className="text-button note-back" onClick={onBack}>← 返回</button><div className="note-toolbar-actions">{editing && <div className="edit-actions">{editError && <span className="inline-error" role="alert">{editError}</span>}<span className="shortcut-hint"><kbd>Esc</kbd> 取消 · <kbd>⌘</kbd><kbd>↵</kbd> 保存</span><button className="button button-ghost" disabled={saveBusy} onClick={cancel}>取消</button><button className="button button-primary" disabled={saveBusy} onClick={() => void save()}>{saveBusy ? "保存中…" : mergingConflict ? "保存并解决冲突" : "保存修改"}</button></div>}{!editing ? <>{!note.deletedAt && !conflictParent && <button ref={editButton} className="button button-primary note-edit-action" disabled={!editDraftLoaded} aria-keyshortcuts="e" title="编辑（E）" onMouseDown={event => event.preventDefault()} onClick={beginEditing}>编辑<kbd className="button-shortcut" aria-hidden="true">E</kbd></button>}<button className="text-button note-secondary-action" aria-pressed={note.starred} onClick={() => void update(note, { starred: !note.starred })}>{note.starred ? "★ 已星标" : "☆ 星标"}</button>
+      {note.deletedAt && <button className="text-button note-secondary-action" onClick={() => void restore(note)}>恢复</button>}
+      <div ref={noteActions} className="note-actions" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setNoteActionsOpen(false); }} onKeyDown={event => {
+        if (event.key === "Escape" && noteActionsOpen) { event.preventDefault(); event.stopPropagation(); setNoteActionsOpen(false); noteActionsToggle.current?.focus(); }
+      }}>
+        <button ref={noteActionsToggle} className="text-button note-actions-toggle" aria-expanded={noteActionsOpen} aria-controls="note-actions-menu" onClick={() => {
+          setNoteActionsOpen(value => !value);
+          if (!noteActionsOpen) requestAnimationFrame(() => noteActions.current?.querySelector<HTMLButtonElement>(".note-actions-menu button")?.focus());
+        }}>更多</button>
+        <div id="note-actions-menu" className="note-actions-menu" hidden={!noteActionsOpen} role="group" aria-label="更多操作">
+          <CopyButton text={note.content} />
+          {!note.deletedAt && <button className="text-button danger" onClick={() => { setNoteActionsOpen(false); void remove(note); }}>移到回收站</button>}
+        </div>
+      </div></> : null}</div></header>
     <div className="note-detail-layout"><article className={`note-paper ${editing ? "is-editing" : ""}`}>{isConflict(note) && <aside className="conflict-detail"><span><strong>{mergingConflict ? "合并两个版本" : "检测到另一设备的并发修改"}</strong><small>{mergingConflict ? "编辑合并后的正文并保存；完成后冲突记录会自动移入回收站。" : conflictParent ? `原版本“${conflictParent.title}”仍然保留，请明确选择处理方式。` : "原版本仍然保留，可编辑本记录完成手动合并。"}</small></span>{!editing && !note.deletedAt && <div className="conflict-actions">{conflictParent && <><button className="button button-secondary" onClick={() => void resolveConflict(false)}>保留当前</button><button className="button button-secondary" onClick={() => void resolveConflict(true)}>使用另一版本</button><button className="button button-primary" onClick={beginConflictMerge}>合并后保存</button></>}</div>}</aside>}<div className="note-origin"><time>{new Date(note.createdAt).toLocaleString()}</time><span>{editing ? mergingConflict ? "正在合并" : "编辑中" : "已保存在本机"}</span></div>
       {editing ? <><div ref={editorTools} className="editor-action-dock" role="toolbar" aria-label="编辑操作"><button className="button button-secondary mobile-editor-tools-toggle" aria-expanded={mobileToolsOpen} aria-controls="editor-tools-menu" onMouseDown={event => event.preventDefault()} onClick={() => setMobileToolsOpen(value => !value)}>工具</button><div id="editor-tools-menu" className="editor-tools" data-mobile-open={mobileToolsOpen}><button className="button button-secondary" aria-pressed={sourceMode} onMouseDown={event => event.preventDefault()} onClick={() => { setMobileToolsOpen(false); setSourceMode(value => !value); editor.current?.focus(); }}>{sourceMode ? "返回实时预览" : "Markdown 源码"}</button><button className="button button-secondary" onMouseDown={event => event.preventDefault()} onClick={() => { setMobileToolsOpen(false); editor.current?.insertCode(); }}>插入代码片段</button><label className="button button-secondary">添加图片<input hidden type="file" accept="image/*" multiple onChange={event => { const files = event.target.files ? [...event.target.files] : []; event.target.value = ""; setMobileToolsOpen(false); if (files.length) void addImages(files); }} /></label><button className="button button-secondary" onClick={() => { setMobileToolsOpen(false); void editSource(); }}>关联来源</button></div></div><input ref={titleEditor} aria-label="记录标题" disabled={saveBusy} className="note-title-input" value={title} onChange={event => setTitle(event.target.value)} onKeyDown={editorKeyDown} enterKeyHint="next" placeholder="标题（可选）" /><MarkdownEditor ref={editor} value={content} onChange={setContent} sourceMode={sourceMode} disabled={saveBusy || !editDraftLoaded} initialSelection={initialSelection.current} initialViewport={initialViewport.current} onSave={() => void save()} onCancel={cancel} onPasteImages={files => void addImages(files)} /></> : conflictParent ? <section className="conflict-compare"><article><header><strong>当前版本</strong><time>{new Date(conflictParent.updatedAt).toLocaleString()}</time></header><h2>{conflictParent.title}</h2><div className="note-rendered"><MarkdownContent content={conflictParent.content} /></div></article><article><header><strong>另一设备版本</strong><time>{new Date(note.updatedAt).toLocaleString()}</time></header><h2>{note.title.replace(/^同步冲突：/, "")}</h2><div className="note-rendered"><MarkdownContent content={note.content} /></div></article></section> : <><h1 className="note-title">{note.title}</h1><div ref={reader} className="note-rendered" onCopy={copyReadingSelection}><MarkdownContent content={note.content} /></div></>}
       {source && <p className="note-source">来源：<a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a></p>}

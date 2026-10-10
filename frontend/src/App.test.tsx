@@ -445,7 +445,7 @@ describe("core note interactions", () => {
     history.replaceState(null, "", `/notes/${note.id}`);
     render(<App />);
     const noteActions = await screen.findByRole("button", { name: "更多" });
-    expect(noteActions).toHaveClass("mobile-note-actions-toggle");
+    expect(noteActions).toHaveClass("note-actions-toggle");
     expect(noteActions).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(noteActions);
     expect(noteActions).toHaveAttribute("aria-expanded", "true");
@@ -570,6 +570,45 @@ describe("core note interactions", () => {
     } finally { confirm.mockRestore(); }
   });
 
+  it("keeps secondary actions behind a disclosure and restores focus with Escape", async () => {
+    await saveNote(noteFixture("actions", "更多操作测试", now()), false);
+    history.replaceState(null, "", "/notes/actions");
+    render(<App />);
+    const more = await screen.findByRole("button", { name: "更多" });
+    expect(screen.queryByRole("button", { name: "移到回收站" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "☆ 星标" })).toBeVisible();
+    await userEvent.click(more);
+    const copy = screen.getByRole("button", { name: "复制 Markdown" });
+    await waitFor(() => expect(copy).toHaveFocus());
+    await userEvent.keyboard("{Escape}");
+    expect(more).toHaveFocus();
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "移到回收站" })).not.toBeInTheDocument();
+  });
+
+  it("ignores composing and modal shortcuts and only navigates actual search results", async () => {
+    await saveNote(noteFixture("keyboard", "键盘查找", now()), false);
+    render(<App />);
+    const search = await screen.findByRole("searchbox");
+    fireEvent.keyDown(document.body, { key: "/", isComposing: true });
+    expect(search).not.toHaveFocus();
+    fireEvent.keyDown(document.body, { key: "/" });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: "键盘" } });
+    const selected = await screen.findByText("查找", { exact: false, selector: ".note-row-title" });
+    await waitFor(() => expect(selected.closest("article")).toHaveClass("keyboard-selected"));
+    fireEvent.keyDown(search, { key: "Enter", isComposing: true });
+    expect(window.location.pathname).toBe("/");
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(search).toHaveValue("");
+    expect(search).toHaveFocus();
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(search).not.toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.keyDown(document.body, { key: "/" });
+    expect(search).not.toHaveFocus();
+  });
+
   it("does not offer editing for a trashed note", async () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
     const note = noteFixture("deleted-editor", "已删除记录", now(), { deletedAt: now() });
@@ -578,6 +617,7 @@ describe("core note interactions", () => {
     render(<App />);
     await screen.findByRole("heading", { name: note.title });
     expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByRole("button", { name: "复制 Markdown" })).toBeInTheDocument();
     fireEvent.keyDown(document.body, { key: "e" });
     expect(screen.queryByRole("textbox", { name: "正文编辑器" })).not.toBeInTheDocument();
