@@ -58,3 +58,7 @@ pnpm dev
 上面的命令以访问密钥模式运行。如需本地验证 OIDC，将五项 OIDC 配置作为服务端环境变量传入，回调地址设为 `http://localhost:5173/api/auth/oidc/callback`。
 
 访问 `http://localhost:5173`。前端默认代理 API 到 `http://127.0.0.1:8080`，可用 `THOUGHTGLEAN_DEV_API_URL` 更改目标。
+
+## 页面设计
+
+界面遵循 [Fluent Design 设计规则](docs/fluent-design.md)，包括颜色、字体、材质、键盘焦点和动效约束。后续页面和组件调整沿用该规则。
